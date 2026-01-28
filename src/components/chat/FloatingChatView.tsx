@@ -8,6 +8,7 @@ import type AgentClientPlugin from "../../plugin";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
 import { InlineHeader } from "./InlineHeader";
+import type { ChatView } from "./ChatView";
 
 // Hooks imports
 import { useChatController } from "../../hooks/useChatController";
@@ -132,7 +133,9 @@ function FloatingChatComponent({ plugin }: FloatingChatComponentProps) {
 			}
 		};
 
-		const timer = setTimeout(saveSize, 500); // Debounce save
+		const timer = setTimeout(() => {
+			void saveSize();
+		}, 500); // Debounce save
 		return () => clearTimeout(timer);
 	}, [size, plugin, settings.floatingWindowSize]);
 
@@ -149,7 +152,9 @@ function FloatingChatComponent({ plugin }: FloatingChatComponentProps) {
 			}
 		};
 
-		const timer = setTimeout(savePosition, 500); // Debounce save
+		const timer = setTimeout(() => {
+			void savePosition();
+		}, 500); // Debounce save
 		return () => clearTimeout(timer);
 	}, [position, plugin, settings.floatingWindowPosition]);
 
@@ -260,7 +265,7 @@ function FloatingChatComponent({ plugin }: FloatingChatComponentProps) {
 						isRestoringSession={sessionHistory.loading}
 						agentLabel={activeAgentLabel}
 						plugin={plugin}
-						view={mockView as any}
+						view={mockView as unknown as ChatView}
 						acpClient={acpClientRef.current}
 						onApprovePermission={permission.approvePermission}
 					/>
@@ -278,7 +283,7 @@ function FloatingChatComponent({ plugin }: FloatingChatComponentProps) {
 					slashCommands={slashCommands}
 					autoMention={autoMention}
 					plugin={plugin}
-					view={mockView as any}
+					view={mockView as unknown as ChatView}
 					onSendMessage={handleSendMessage}
 					onStopGeneration={handleStopGeneration}
 					onRestoredMessageConsumed={handleRestoredMessageConsumed}
