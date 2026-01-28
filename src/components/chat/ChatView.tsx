@@ -1,4 +1,10 @@
-import { ItemView, WorkspaceLeaf, Platform, Notice } from "obsidian";
+import {
+	ItemView,
+	WorkspaceLeaf,
+	Platform,
+	Notice,
+	FileSystemAdapter,
+} from "obsidian";
 import * as React from "react";
 const { useState, useRef, useEffect, useMemo, useCallback } = React;
 import { createRoot, Root } from "react-dom/client";
@@ -45,10 +51,6 @@ import type {
 import type { ImagePromptContent } from "../../domain/models/prompt-content";
 
 // Type definitions for Obsidian internal APIs
-interface VaultAdapterWithBasePath {
-	basePath?: string;
-}
-
 interface AppWithSettings {
 	setting: {
 		open: () => void;
@@ -80,10 +82,12 @@ function ChatComponent({
 	const logger = useMemo(() => new Logger(plugin), [plugin]);
 
 	const vaultPath = useMemo(() => {
-		return (
-			(plugin.app.vault.adapter as VaultAdapterWithBasePath).basePath ||
-			process.cwd()
-		);
+		const adapter = plugin.app.vault.adapter;
+		if (adapter instanceof FileSystemAdapter) {
+			return adapter.getBasePath();
+		}
+		// Fallback for non-FileSystemAdapter (e.g., mobile)
+		return process.cwd();
 	}, [plugin]);
 
 	const noteMentionService = useMemo(
@@ -545,6 +549,7 @@ function ChatComponent({
 				canRestore: sessionHistory.canRestore,
 				canFork: sessionHistory.canFork,
 				isUsingLocalSessions: sessionHistory.isUsingLocalSessions,
+				localSessionIds: sessionHistory.localSessionIds,
 				isAgentReady: isSessionReady,
 				debugMode: settings.debugMode,
 				onRestoreSession: handleHistoryRestoreSession,
@@ -582,6 +587,7 @@ function ChatComponent({
 				canRestore: sessionHistory.canRestore,
 				canFork: sessionHistory.canFork,
 				isUsingLocalSessions: sessionHistory.isUsingLocalSessions,
+				localSessionIds: sessionHistory.localSessionIds,
 				isAgentReady: isSessionReady,
 				debugMode: settings.debugMode,
 				onRestoreSession: handleHistoryRestoreSession,
@@ -600,6 +606,7 @@ function ChatComponent({
 		sessionHistory.canRestore,
 		sessionHistory.canFork,
 		sessionHistory.isUsingLocalSessions,
+		sessionHistory.localSessionIds,
 		vaultPath,
 		isSessionReady,
 		settings.debugMode,
@@ -615,10 +622,13 @@ function ChatComponent({
 			const isFirstMessage = messages.length === 0;
 
 			await chat.sendMessage(content, {
-				activeNote: autoMention.activeNote,
-				vaultBasePath:
-					(plugin.app.vault.adapter as VaultAdapterWithBasePath)
-						.basePath || "",
+				// TODO: Refactor to handle settings inside useAutoMention hook
+				// Current: Pass null when setting is OFF to disable auto-mention
+				// Ideal: useAutoMention should accept settings and return effective values
+				activeNote: settings.autoMentionActiveNote
+					? autoMention.activeNote
+					: null,
+				vaultBasePath: vaultPath,
 				isAutoMentionDisabled: autoMention.isDisabled,
 				images,
 			});
@@ -642,6 +652,7 @@ function ChatComponent({
 			session.sessionId,
 			sessionHistory,
 			logger,
+			settings.autoMentionActiveNote,
 		],
 	);
 
