@@ -420,11 +420,11 @@ function FloatingChatComponent({
 
 				<div className="agent-client-floating-content">
 					{floatingButtonImageSrc && (
-						<div className="agent-client-code-block-image-container">
+						<div className="agent-client-agent-image-container">
 							<img
 								src={floatingButtonImageSrc}
 								alt="Agent"
-								className="agent-client-code-block-image"
+								className="agent-client-agent-image"
 							/>
 						</div>
 					)}
