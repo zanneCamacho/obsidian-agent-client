@@ -88,6 +88,10 @@ function FloatingChatComponent({
 	const acpClientRef = useRef(acpAdapter);
 
 	// Mock View for ChatInput/ChatMessages
+	// TODO: This mock only implements registerDomEvent without cleanup.
+	// addEventListener is called but removeEventListener is not called on unmount.
+	// In practice, this doesn't cause issues since the container DOM is removed,
+	// but consider implementing proper cleanup or refactoring ChatMessages to not require view.
 	const mockView = useMemo(() => {
 		return {
 			app: plugin.app,
