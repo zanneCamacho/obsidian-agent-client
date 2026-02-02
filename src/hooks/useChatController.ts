@@ -44,9 +44,10 @@ export interface UseChatControllerOptions {
 	viewId: string;
 	workingDirectory?: string;
 	initialAgentId?: string;
+	// TODO(code-block): Configuration for future code block chat view
 	config?: {
-		agent?: string; // For code block agent override
-		model?: string; // For code block model override
+		agent?: string;
+		model?: string;
 	};
 }
 
@@ -637,7 +638,7 @@ export function useChatController(
 		void agentSession.createSession(config?.agent || initialAgentId);
 	}, [agentSession.createSession, config?.agent, initialAgentId]);
 
-	// Apply configured model when session is ready (for code block)
+	// TODO(code-block): Apply configured model when session is ready
 	useEffect(() => {
 		if (config?.model && isSessionReady && session.models) {
 			const modelExists = session.models.availableModels.some(

@@ -33,7 +33,7 @@ export interface InlineHeaderProps {
 	onExportChat: () => void;
 	/** Callback to restart agent */
 	onRestartAgent: () => void;
-	/** View variant */
+	/** View variant (TODO(code-block): "codeblock" for future code block chat view) */
 	variant: "floating" | "codeblock";
 	/** Callback to open new window (floating only) */
 	onOpenNewWindow?: () => void;

@@ -2029,6 +2029,7 @@ If your plugin does not need CSS, delete this file.
 }
 
 /* ===== Code Block Chat View ===== */
+/* TODO(code-block): Styles for future code block chat view */
 .agent-client-code-block-container {
 	display: flex;
 	flex-direction: column;
