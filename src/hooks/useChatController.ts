@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { Notice } from "obsidian";
+import { Notice, FileSystemAdapter } from "obsidian";
 
 import type AgentClientPlugin from "../plugin";
 import type { AttachedImage } from "../components/chat/ImagePreviewStrip";
@@ -37,11 +37,6 @@ import type { ImagePromptContent } from "../domain/models/prompt-content";
 interface AgentInfo {
 	id: string;
 	displayName: string;
-}
-
-// Type definitions for Obsidian internal APIs
-interface VaultAdapterWithBasePath {
-	basePath?: string;
 }
 
 export interface UseChatControllerOptions {
@@ -131,10 +126,12 @@ export function useChatController(
 		if (options.workingDirectory) {
 			return options.workingDirectory;
 		}
-		return (
-			(plugin.app.vault.adapter as VaultAdapterWithBasePath).basePath ||
-			process.cwd()
-		);
+		const adapter = plugin.app.vault.adapter;
+		if (adapter instanceof FileSystemAdapter) {
+			return adapter.getBasePath();
+		}
+		// Fallback for non-FileSystemAdapter (e.g., mobile)
+		return process.cwd();
 	}, [plugin, options.workingDirectory]);
 
 	const noteMentionService = useMemo(
@@ -313,9 +310,7 @@ export function useChatController(
 				activeNote: settings.autoMentionActiveNote
 					? autoMention.activeNote
 					: null,
-				vaultBasePath:
-					(plugin.app.vault.adapter as VaultAdapterWithBasePath)
-						.basePath || "",
+				vaultBasePath: vaultPath,
 				isAutoMentionDisabled: autoMention.isDisabled,
 				images,
 			});
