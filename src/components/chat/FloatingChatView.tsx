@@ -1,35 +1,192 @@
 import * as React from "react";
 const { useState, useRef, useEffect, useCallback, useMemo } = React;
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
+import { Notice } from "obsidian";
 
 import type AgentClientPlugin from "../../plugin";
+import type {
+	IChatViewContainer,
+	ChatViewType,
+} from "../../domain/ports/chat-view-container.port";
+import type { ChatInputState } from "../../domain/models/chat-input-state";
+import type { IChatViewHost } from "./types";
+import type { ImagePromptContent } from "../../domain/models/prompt-content";
 
 // Component imports
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
 import { InlineHeader } from "./InlineHeader";
-import type { ChatView } from "./ChatView";
 
 // Hooks imports
 import { useChatController } from "../../hooks/useChatController";
 
+// ============================================================
+// Type Definitions
+// ============================================================
+
+/**
+ * Callbacks for FloatingViewContainer to access React component state.
+ * These enable the container to implement IChatViewContainer by delegating
+ * to the React component's state and handlers.
+ */
+interface FloatingViewCallbacks {
+	getInputState: () => ChatInputState | null;
+	setInputState: (state: ChatInputState) => void;
+	canSend: () => boolean;
+	sendMessage: () => Promise<boolean>;
+	cancelOperation: () => Promise<void>;
+	focus: () => void;
+	hasFocus: () => boolean;
+	expand: () => void;
+}
+
+/**
+ * Tracked listener for cleanup on unmount.
+ * Uses union type to match IChatViewHost's overloaded registerDomEvent signatures.
+ *
+ * Note: options is not tracked because current usage sites do not use options.
+ * If future code uses options (e.g., { capture: true }), the cleanup will not
+ * work correctly. This is acceptable as current usage does not require options.
+ */
+interface RegisteredListener {
+	target: Window | Document | HTMLElement;
+	type: string;
+	callback: EventListenerOrEventListenerObject;
+}
+
+// ============================================================
+// FloatingViewContainer Class
+// ============================================================
+
+/**
+ * Wrapper class that implements IChatViewContainer for floating chat views.
+ * Manages the React component lifecycle and provides the interface for
+ * unified view management via ChatViewRegistry.
+ */
+export class FloatingViewContainer implements IChatViewContainer {
+	readonly viewType: ChatViewType = "floating";
+	readonly viewId: string;
+
+	private plugin: AgentClientPlugin;
+	private root: Root | null = null;
+	private containerEl: HTMLElement;
+	private callbacks: FloatingViewCallbacks | null = null;
+
+	constructor(plugin: AgentClientPlugin, instanceId: string) {
+		this.plugin = plugin;
+		// viewId format: "floating-chat-{instanceId}" to match useChatController's adapter key
+		this.viewId = `floating-chat-${instanceId}`;
+		this.containerEl = document.body.createDiv({
+			cls: "agent-client-floating-root",
+		});
+	}
+
+	/**
+	 * Mount the React component and register with the plugin.
+	 */
+	mount(initialExpanded: boolean): void {
+		this.root = createRoot(this.containerEl);
+		this.root.render(
+			<FloatingChatComponent
+				plugin={this.plugin}
+				viewId={this.viewId}
+				initialExpanded={initialExpanded}
+				onRegisterCallbacks={(cbs) => {
+					this.callbacks = cbs;
+				}}
+			/>,
+		);
+
+		// Register with plugin's view registry
+		this.plugin.viewRegistry.register(this);
+	}
+
+	/**
+	 * Unmount the React component and unregister from the plugin.
+	 */
+	unmount(): void {
+		this.plugin.viewRegistry.unregister(this.viewId);
+
+		if (this.root) {
+			this.root.unmount();
+			this.root = null;
+		}
+		this.containerEl.remove();
+	}
+
+	// ============================================================
+	// IChatViewContainer Implementation
+	// ============================================================
+
+	onActivate(): void {
+		// Floating views don't need special activation handling
+	}
+
+	onDeactivate(): void {
+		// Floating views don't need special deactivation handling
+	}
+
+	focus(): void {
+		// Expand if collapsed, then focus
+		this.callbacks?.focus();
+	}
+
+	hasFocus(): boolean {
+		return this.callbacks?.hasFocus() ?? false;
+	}
+
+	expand(): void {
+		this.callbacks?.expand();
+	}
+
+	getInputState(): ChatInputState | null {
+		return this.callbacks?.getInputState() ?? null;
+	}
+
+	setInputState(state: ChatInputState): void {
+		this.callbacks?.setInputState(state);
+	}
+
+	canSend(): boolean {
+		return this.callbacks?.canSend() ?? false;
+	}
+
+	async sendMessage(): Promise<boolean> {
+		return (await this.callbacks?.sendMessage()) ?? false;
+	}
+
+	async cancelOperation(): Promise<void> {
+		await this.callbacks?.cancelOperation();
+	}
+
+	getContainerEl(): HTMLElement {
+		return this.containerEl;
+	}
+}
+
+// ============================================================
+// FloatingChatComponent
+// ============================================================
+
 interface FloatingChatComponentProps {
 	plugin: AgentClientPlugin;
-	instanceId: string;
+	viewId: string; // Full viewId passed from FloatingViewContainer
 	initialExpanded?: boolean;
+	onRegisterCallbacks?: (callbacks: FloatingViewCallbacks) => void;
 }
 
 function FloatingChatComponent({
 	plugin,
-	instanceId,
+	viewId,
 	initialExpanded = false,
+	onRegisterCallbacks,
 }: FloatingChatComponentProps) {
 	// ============================================================
 	// Chat Controller Hook (Centralized Logic)
 	// ============================================================
 	const controller = useChatController({
 		plugin,
-		viewId: `floating-chat-${instanceId}`,
+		viewId, // Use viewId prop directly (already in "floating-chat-{id}" format)
 		workingDirectory: undefined, // Let hook determine from vault
 	});
 
@@ -87,23 +244,41 @@ function FloatingChatComponent({
 
 	const acpClientRef = useRef(acpAdapter);
 
-	// Mock View for ChatInput/ChatMessages
-	// TODO: This mock only implements registerDomEvent without cleanup.
-	// addEventListener is called but removeEventListener is not called on unmount.
-	// In practice, this doesn't cause issues since the container DOM is removed,
-	// but consider implementing proper cleanup or refactoring ChatMessages to not require view.
-	const mockView = useMemo(() => {
-		return {
+	// Track registered listeners for cleanup
+	const registeredListenersRef = useRef<RegisteredListener[]>([]);
+
+	// IChatViewHost implementation with listener tracking
+	// Type assertion is used because the implementation handles all overload cases uniformly
+	const viewHost: IChatViewHost = useMemo(
+		() => ({
 			app: plugin.app,
-			registerDomEvent: (
-				target: EventTarget,
+			registerDomEvent: ((
+				target: Window | Document | HTMLElement,
 				type: string,
 				callback: EventListenerOrEventListenerObject,
 			) => {
 				target.addEventListener(type, callback);
-			},
+				// Track for cleanup on unmount
+				// Note: options is not tracked (see RegisteredListener comment)
+				registeredListenersRef.current.push({ target, type, callback });
+			}) as IChatViewHost["registerDomEvent"],
+		}),
+		[plugin.app],
+	);
+
+	// Cleanup registered listeners on unmount
+	useEffect(() => {
+		return () => {
+			for (const {
+				target,
+				type,
+				callback,
+			} of registeredListenersRef.current) {
+				target.removeEventListener(type, callback);
+			}
+			registeredListenersRef.current = [];
 		};
-	}, [plugin.app]);
+	}, []);
 
 	// Floating button image source
 	const floatingButtonImageSrc = useMemo(() => {
@@ -148,9 +323,10 @@ function FloatingChatComponent({
 	// Listen for expand requests from other instances
 	useEffect(() => {
 		const handleExpandRequest = (
-			event: CustomEvent<{ instanceId: string }>,
+			event: CustomEvent<{ viewId: string }>,
 		) => {
-			if (event.detail.instanceId === instanceId) {
+			// Compare using viewId (format: "floating-chat-{id}")
+			if (event.detail.viewId === viewId) {
 				setIsExpanded(true);
 				setShowInstanceMenu(false);
 			}
@@ -166,7 +342,7 @@ function FloatingChatComponent({
 				handleExpandRequest as EventListener,
 			);
 		};
-	}, [instanceId]);
+	}, [viewId]);
 
 	// Sync manual resizing with state
 	useEffect(() => {
@@ -270,13 +446,265 @@ function FloatingChatComponent({
 	}, [isDragging]);
 
 	// ============================================================
+	// Callback Registration for IChatViewContainer
+	// ============================================================
+	// Register callbacks for FloatingViewContainer to access React component state
+	// These must match ChatView's sendMessageForBroadcast/canSendForBroadcast functionality
+	useEffect(() => {
+		if (onRegisterCallbacks) {
+			onRegisterCallbacks({
+				getInputState: () => ({
+					text: inputValue,
+					images: attachedImages,
+				}),
+				setInputState: (state) => {
+					setInputValue(state.text);
+					setAttachedImages(state.images);
+				},
+				// Match ChatView.canSendForBroadcast exactly
+				canSend: () => {
+					const hasContent =
+						inputValue.trim() !== "" || attachedImages.length > 0;
+					return (
+						hasContent &&
+						isSessionReady &&
+						!sessionHistory.loading &&
+						!isSending
+					);
+				},
+				// Match ChatView.sendMessageForBroadcast exactly
+				sendMessage: async () => {
+					// Allow sending if there's text OR images
+					if (!inputValue.trim() && attachedImages.length === 0) {
+						return false;
+					}
+					if (!isSessionReady || sessionHistory.loading) {
+						return false;
+					}
+					if (isSending) {
+						return false;
+					}
+
+					// Convert attached images to ImagePromptContent format
+					const imagesToSend: ImagePromptContent[] =
+						attachedImages.map((img) => ({
+							type: "image",
+							data: img.data,
+							mimeType: img.mimeType,
+						}));
+
+					// Clear input before sending
+					const messageToSend = inputValue.trim();
+					setInputValue("");
+					setAttachedImages([]);
+
+					await handleSendMessage(
+						messageToSend,
+						imagesToSend.length > 0 ? imagesToSend : undefined,
+					);
+					return true;
+				},
+				cancelOperation: handleStopGeneration,
+				// Focus with auto-expand
+				focus: () => {
+					// Expand if collapsed
+					if (!isExpanded) {
+						setIsExpanded(true);
+					}
+					// Focus after next render (expansion may need a frame)
+					requestAnimationFrame(() => {
+						const textarea = containerRef.current?.querySelector(
+							"textarea.agent-client-chat-input-textarea",
+						);
+						if (textarea instanceof HTMLTextAreaElement) {
+							textarea.focus();
+						}
+					});
+				},
+				hasFocus: () =>
+					isExpanded &&
+					(containerRef.current?.contains(document.activeElement) ??
+						false),
+				expand: () => {
+					setIsExpanded(true);
+				},
+			});
+		}
+	}, [
+		onRegisterCallbacks,
+		inputValue,
+		attachedImages,
+		isSessionReady,
+		isSending,
+		sessionHistory.loading,
+		isExpanded,
+		handleSendMessage,
+		handleStopGeneration,
+	]);
+
+	// ============================================================
+	// Workspace Events (Hotkeys) - same as ChatView.ChatComponent
+	// ============================================================
+
+	// 1. Toggle auto-mention
+	useEffect(() => {
+		const workspace = plugin.app.workspace;
+		type CustomEventCallback = (targetViewId?: string) => void;
+
+		const eventRef = (
+			workspace as unknown as {
+				on: (
+					name: string,
+					callback: CustomEventCallback,
+				) => ReturnType<typeof workspace.on>;
+			}
+		).on("agent-client:toggle-auto-mention", (targetViewId?: string) => {
+			if (targetViewId && targetViewId !== viewId) return;
+			autoMention.toggle();
+		});
+
+		return () => {
+			workspace.offref(eventRef);
+		};
+	}, [plugin.app.workspace, autoMention.toggle, viewId]);
+
+	// 2. New chat requested (from "New chat with [Agent]" command)
+	useEffect(() => {
+		const workspace = plugin.app.workspace;
+
+		const eventRef = (
+			workspace as unknown as {
+				on: (
+					name: string,
+					callback: (agentId?: string) => void,
+				) => ReturnType<typeof workspace.on>;
+			}
+		).on("agent-client:new-chat-requested", (agentId?: string) => {
+			// Only respond if we are the last active view
+			if (
+				plugin.lastActiveChatViewId &&
+				plugin.lastActiveChatViewId !== viewId
+			) {
+				return;
+			}
+			void handleNewChat(agentId);
+		});
+
+		return () => {
+			workspace.offref(eventRef);
+		};
+	}, [
+		plugin.app.workspace,
+		plugin.lastActiveChatViewId,
+		handleNewChat,
+		viewId,
+	]);
+
+	// 3. Permission commands
+	useEffect(() => {
+		const workspace = plugin.app.workspace;
+		type CustomEventCallback = (targetViewId?: string) => void;
+
+		const approveRef = (
+			workspace as unknown as {
+				on: (
+					name: string,
+					callback: CustomEventCallback,
+				) => ReturnType<typeof workspace.on>;
+			}
+		).on(
+			"agent-client:approve-active-permission",
+			(targetViewId?: string) => {
+				if (targetViewId && targetViewId !== viewId) return;
+				void (async () => {
+					const success = await permission.approveActivePermission();
+					if (!success) {
+						new Notice(
+							"[Agent Client] No active permission request",
+						);
+					}
+				})();
+			},
+		);
+
+		const rejectRef = (
+			workspace as unknown as {
+				on: (
+					name: string,
+					callback: CustomEventCallback,
+				) => ReturnType<typeof workspace.on>;
+			}
+		).on(
+			"agent-client:reject-active-permission",
+			(targetViewId?: string) => {
+				if (targetViewId && targetViewId !== viewId) return;
+				void (async () => {
+					const success = await permission.rejectActivePermission();
+					if (!success) {
+						new Notice(
+							"[Agent Client] No active permission request",
+						);
+					}
+				})();
+			},
+		);
+
+		const cancelRef = (
+			workspace as unknown as {
+				on: (
+					name: string,
+					callback: CustomEventCallback,
+				) => ReturnType<typeof workspace.on>;
+			}
+		).on("agent-client:cancel-message", (targetViewId?: string) => {
+			if (targetViewId && targetViewId !== viewId) return;
+			void handleStopGeneration();
+		});
+
+		return () => {
+			workspace.offref(approveRef);
+			workspace.offref(rejectRef);
+			workspace.offref(cancelRef);
+		};
+	}, [
+		plugin.app.workspace,
+		permission.approveActivePermission,
+		permission.rejectActivePermission,
+		handleStopGeneration,
+		viewId,
+	]);
+
+	// ============================================================
+	// Focus Tracking (ChatView と同等)
+	// ============================================================
+	useEffect(() => {
+		const handleFocus = () => {
+			plugin.setLastActiveChatViewId(viewId);
+		};
+
+		const container = containerRef.current;
+		if (!container) return;
+
+		container.addEventListener("focus", handleFocus, true);
+		container.addEventListener("click", handleFocus);
+
+		// Set as active on mount
+		plugin.setLastActiveChatViewId(viewId);
+
+		return () => {
+			container.removeEventListener("focus", handleFocus, true);
+			container.removeEventListener("click", handleFocus);
+		};
+	}, [plugin, viewId]);
+
+	// ============================================================
 	// Render
 	// ============================================================
 	if (!settings.showFloatingButton) return null;
 
 	// Only show button for the first instance (others are hidden)
 	const allInstances = plugin.getFloatingChatInstances();
-	const isFirstInstance = allInstances[0] === instanceId;
+	const isFirstInstance = allInstances[0] === viewId;
 
 	// Render button (only from first instance)
 	const renderButton = () => {
@@ -313,7 +741,7 @@ function FloatingChatComponent({
 							<div
 								key={id}
 								className={`agent-client-floating-instance-menu-item ${
-									id === instanceId ? "active" : ""
+									id === viewId ? "active" : ""
 								}`}
 							>
 								<span
@@ -324,7 +752,7 @@ function FloatingChatComponent({
 									style={{ flex: 1, cursor: "pointer" }}
 								>
 									Chat {index + 1}{" "}
-									{id === instanceId
+									{id === viewId
 										? `(${activeAgentLabel})`
 										: ""}
 								</span>
@@ -441,7 +869,7 @@ function FloatingChatComponent({
 							isRestoringSession={sessionHistory.loading}
 							agentLabel={activeAgentLabel}
 							plugin={plugin}
-							view={mockView as unknown as ChatView}
+							view={viewHost}
 							acpClient={acpClientRef.current}
 							onApprovePermission={permission.approvePermission}
 						/>
@@ -459,7 +887,7 @@ function FloatingChatComponent({
 						slashCommands={slashCommands}
 						autoMention={autoMention}
 						plugin={plugin}
-						view={mockView as unknown as ChatView}
+						view={viewHost}
 						onSendMessage={handleSendMessage}
 						onStopGeneration={handleStopGeneration}
 						onRestoredMessageConsumed={
@@ -487,21 +915,19 @@ function FloatingChatComponent({
 		</>
 	);
 }
-export function mountFloatingChat(
+/**
+ * Create a new floating chat view.
+ * @param plugin - The plugin instance
+ * @param instanceId - The instance ID (e.g., "0", "1", "2")
+ * @param initialExpanded - Whether to start expanded
+ * @returns The FloatingViewContainer instance
+ */
+export function createFloatingChat(
 	plugin: AgentClientPlugin,
 	instanceId: string,
 	initialExpanded = false,
-) {
-	const container = document.body.createDiv({
-		cls: "agent-client-floating-root",
-	});
-	const root = createRoot(container);
-	root.render(
-		<FloatingChatComponent
-			plugin={plugin}
-			instanceId={instanceId}
-			initialExpanded={initialExpanded}
-		/>,
-	);
-	return { root, container };
+): FloatingViewContainer {
+	const container = new FloatingViewContainer(plugin, instanceId);
+	container.mount(initialExpanded);
+	return container;
 }

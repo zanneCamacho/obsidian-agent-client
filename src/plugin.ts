@@ -2,7 +2,10 @@ import { Plugin, WorkspaceLeaf, Notice, requestUrl } from "obsidian";
 import type { Root } from "react-dom/client";
 import * as semver from "semver";
 import { ChatView, VIEW_TYPE_CHAT } from "./components/chat/ChatView";
-import { mountFloatingChat } from "./components/chat/FloatingChatView";
+import {
+	createFloatingChat,
+	FloatingViewContainer,
+} from "./components/chat/FloatingChatView";
 import { ChatViewRegistry } from "./shared/chat-view-registry";
 import {
 	createSettingsStore,
@@ -462,13 +465,15 @@ export default class AgentClientPlugin extends Plugin {
 	 * Each window is independent with its own session.
 	 */
 	openNewFloatingChat(initialExpanded = false): void {
-		const instanceId = `floating-${this.floatingChatCounter++}`;
-		const { root, container } = mountFloatingChat(
-			this,
-			instanceId,
-			initialExpanded,
-		);
-		this.floatingChatInstances.set(instanceId, { root, container });
+		// instanceId is just the counter (e.g., "0", "1", "2")
+		// FloatingViewContainer will create viewId as "floating-chat-{instanceId}"
+		const instanceId = String(this.floatingChatCounter++);
+		const container = createFloatingChat(this, instanceId, initialExpanded);
+		// Store by viewId for consistent lookup
+		this.floatingChatInstances.set(container.viewId, {
+			root: null as unknown as Root,
+			container: container.getContainerEl(),
+		});
 	}
 
 	/**
