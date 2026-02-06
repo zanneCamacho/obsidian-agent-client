@@ -5,7 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { setIcon } from "obsidian";
 import type AgentClientPlugin from "../../plugin";
 import { useSettings } from "../../hooks/useSettings";
-import { clampPosition } from "./floating-utils";
+
+interface VaultAdapterWithResourcePath {
+	getResourcePath?: (path: string) => string;
+}
 
 // ============================================================
 // FloatingButtonContainer Class
@@ -64,9 +67,6 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 		) {
 			return img;
 		}
-		interface VaultAdapterWithResourcePath {
-			getResourcePath?: (path: string) => string;
-		}
 		return (
 			plugin.app.vault.adapter as VaultAdapterWithResourcePath
 		).getResourcePath?.(img);
@@ -97,8 +97,7 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 			}
 			return e;
 		});
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [plugin.viewRegistry, allInstances, showInstanceMenu]);
+	}, [plugin.viewRegistry, allInstances]);
 
 	// Button click handler
 	const handleButtonClick = useCallback(() => {
@@ -136,33 +135,28 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 
 	if (!settings.showFloatingButton) return null;
 
-	// Render instance selector menu
-	if (showInstanceMenu) {
-		return (
-			<>
-				<div
-					className="agent-client-floating-button"
-					style={
-						floatingButtonImageSrc
-							? { background: "transparent" }
-							: undefined
-					}
-				>
-					{floatingButtonImageSrc ? (
-						<img src={floatingButtonImageSrc} alt="AI" />
-					) : (
-						<div
-							className="agent-client-floating-button-fallback"
-							ref={(el) => {
-								if (el) setIcon(el, "bot-message-square");
-							}}
-						/>
-					)}
-				</div>
+	const buttonClassName = floatingButtonImageSrc
+		? "agent-client-floating-button has-custom-image"
+		: "agent-client-floating-button";
+
+	return (
+		<>
+			<div className={buttonClassName} onClick={handleButtonClick}>
+				{floatingButtonImageSrc ? (
+					<img src={floatingButtonImageSrc} alt="AI" />
+				) : (
+					<div
+						className="agent-client-floating-button-fallback"
+						ref={(el) => {
+							if (el) setIcon(el, "bot-message-square");
+						}}
+					/>
+				)}
+			</div>
+			{showInstanceMenu && (
 				<div
 					ref={instanceMenuRef}
 					className="agent-client-floating-instance-menu"
-					onClick={(e) => e.stopPropagation()}
 				>
 					<div className="agent-client-floating-instance-menu-header">
 						Select session to open
@@ -177,7 +171,9 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 								setShowInstanceMenu(false);
 							}}
 						>
-							<span style={{ flex: 1 }}>{label}</span>
+							<span className="agent-client-floating-instance-menu-label">
+								{label}
+							</span>
 							{instanceLabels.length > 1 && (
 								<button
 									className="agent-client-floating-instance-menu-close"
@@ -196,31 +192,7 @@ function FloatingButtonComponent({ plugin }: FloatingButtonProps) {
 						</div>
 					))}
 				</div>
-			</>
-		);
-	}
-
-	// Render button
-	return (
-		<div
-			className="agent-client-floating-button"
-			onClick={handleButtonClick}
-			style={
-				floatingButtonImageSrc
-					? { background: "transparent" }
-					: undefined
-			}
-		>
-			{floatingButtonImageSrc ? (
-				<img src={floatingButtonImageSrc} alt="AI" />
-			) : (
-				<div
-					className="agent-client-floating-button-fallback"
-					ref={(el) => {
-						if (el) setIcon(el, "bot-message-square");
-					}}
-				/>
 			)}
-		</div>
+		</>
 	);
 }
