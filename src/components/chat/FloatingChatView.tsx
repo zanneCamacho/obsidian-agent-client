@@ -20,7 +20,7 @@ import { InlineHeader } from "./InlineHeader";
 // Hooks imports
 import { useChatController } from "../../hooks/useChatController";
 
-import { clampPosition } from "./floating-utils";
+import { clampPosition } from "../../shared/floating-utils";
 
 // ============================================================
 // Type Definitions
