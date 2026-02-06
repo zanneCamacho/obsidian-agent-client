@@ -2273,19 +2273,3 @@ If your plugin does not need CSS, delete this file.
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-
-/* ===== History Loading Spinner ===== */
-.agent-client-history-loading {
-	animation: spin 1s linear infinite;
-	display: inline-block;
-	font-size: 14px;
-}
-
-@keyframes spin {
-	from {
-		transform: rotate(0deg);
-	}
-	to {
-		transform: rotate(360deg);
-	}
-}
