@@ -751,7 +751,7 @@ If your plugin does not need CSS, delete this file.
 	padding: 12px;
 	box-sizing: border-box;
 	font-family: inherit;
-	font-size: var(--font-text-size);
+	font-size: var(--ac-chat-font-size);
 	line-height: var(--line-height-normal);
 	/* Text wrapping */
 	white-space: pre-wrap;

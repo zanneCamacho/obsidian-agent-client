@@ -204,6 +204,23 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					return currentFontSize === null ? "" : String(currentFontSize);
 				};
 
+				const persistChatFontSize = async (
+					fontSize: number | null,
+				): Promise<void> => {
+					if (this.plugin.settings.displaySettings.fontSize === fontSize) {
+						return;
+					}
+
+					const nextSettings = {
+						...this.plugin.settings,
+						displaySettings: {
+							...this.plugin.settings.displaySettings,
+							fontSize,
+						},
+					};
+					await this.plugin.saveSettingsAndNotify(nextSettings);
+				};
+
 				text
 					.setPlaceholder(
 						`${CHAT_FONT_SIZE_MIN}-${CHAT_FONT_SIZE_MAX}`,
@@ -211,14 +228,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.setValue(getCurrentDisplayValue())
 					.onChange(async (value) => {
 						if (value.trim().length === 0) {
-							const hasChanged =
-								this.plugin.settings.displaySettings.fontSize !==
-								null;
-							if (hasChanged) {
-								this.plugin.settings.displaySettings.fontSize =
-									null;
-								await this.plugin.saveSettings();
-							}
+							await persistChatFontSize(null);
 							return;
 						}
 
@@ -244,9 +254,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 							this.plugin.settings.displaySettings.fontSize !==
 							parsedFontSize;
 						if (hasChanged) {
-							this.plugin.settings.displaySettings.fontSize =
-								parsedFontSize;
-							await this.plugin.saveSettings();
+							await persistChatFontSize(parsedFontSize);
 						}
 					});
 
@@ -268,9 +276,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 								this.plugin.settings.displaySettings.fontSize !==
 								parsedFontSize;
 							if (hasChanged) {
-								this.plugin.settings.displaySettings.fontSize =
-									parsedFontSize;
-								void this.plugin.saveSettings();
+								void persistChatFontSize(parsedFontSize);
 							}
 							return;
 						}
