@@ -793,14 +793,18 @@ export class ChatView extends ItemView implements IChatViewContainer {
 
 	/**
 	 * Programmatically focus this view's input.
+	 * Reveals the leaf first so that Obsidian switches to this tab
+	 * before focusing the textarea (required for sidebar tabs).
 	 */
 	focus(): void {
-		const textarea = this.containerEl.querySelector(
-			"textarea.agent-client-chat-input-textarea",
-		);
-		if (textarea instanceof HTMLTextAreaElement) {
-			textarea.focus();
-		}
+		void this.app.workspace.revealLeaf(this.leaf).then(() => {
+			const textarea = this.containerEl.querySelector(
+				"textarea.agent-client-chat-input-textarea",
+			);
+			if (textarea instanceof HTMLTextAreaElement) {
+				textarea.focus();
+			}
+		});
 	}
 
 	/**
