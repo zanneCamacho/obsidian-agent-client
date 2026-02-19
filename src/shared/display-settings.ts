@@ -1,5 +1,5 @@
 export const CHAT_FONT_SIZE_MIN = 10;
-export const CHAT_FONT_SIZE_MAX = 24;
+export const CHAT_FONT_SIZE_MAX = 30;
 
 export const parseChatFontSize = (value: unknown): number | null => {
 	if (value === null || value === undefined) {
