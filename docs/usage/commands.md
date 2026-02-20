@@ -27,6 +27,14 @@ Control multiple chat views at once. See [Multi-Session Chat](/usage/multi-sessi
 | **Broadcast send** | Send messages in all views simultaneously |
 | **Broadcast cancel** | Cancel operations in all views |
 
+## Floating Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| **Open floating chat window** | Open an existing floating window, or create one if none exist |
+| **Open new floating chat window** | Always create a new floating window |
+| **Close floating chat window** | Hide the focused floating window (session is preserved) |
+
 ## Agent Commands
 
 | Command | Description |

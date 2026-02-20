@@ -1,6 +1,19 @@
-import { Plugin, WorkspaceLeaf, Notice, requestUrl } from "obsidian";
+import {
+	Plugin,
+	WorkspaceLeaf,
+	WorkspaceSplit,
+	Notice,
+	requestUrl,
+} from "obsidian";
+import type { Root } from "react-dom/client";
 import * as semver from "semver";
 import { ChatView, VIEW_TYPE_CHAT } from "./components/chat/ChatView";
+import {
+	createFloatingChat,
+	FloatingViewContainer,
+} from "./components/chat/FloatingChatView";
+import { FloatingButtonContainer } from "./components/chat/FloatingButton";
+import { ChatViewRegistry } from "./shared/chat-view-registry";
 import {
 	createSettingsStore,
 	type SettingsStore,
@@ -13,6 +26,7 @@ import {
 	normalizeCustomAgent,
 	ensureUniqueCustomAgentIds,
 } from "./shared/settings-utils";
+import { parseChatFontSize } from "./shared/display-settings";
 import {
 	AgentEnvVar,
 	GeminiAgentSettings,
@@ -36,10 +50,15 @@ export type SendMessageShortcut = "enter" | "cmd-enter";
 /**
  * Chat view location configuration.
  * - 'right-tab': Open in right pane as tabs (default)
+ * - 'right-split': Open in right pane with vertical split
  * - 'editor-tab': Open in editor area as tabs
  * - 'editor-split': Open in editor area with right split
  */
-export type ChatViewLocation = "right-tab" | "editor-tab" | "editor-split";
+export type ChatViewLocation =
+	| "right-tab"
+	| "right-split"
+	| "editor-tab"
+	| "editor-split";
 
 export interface AgentClientPluginSettings {
 	gemini: GeminiAgentSettings;
@@ -77,9 +96,18 @@ export interface AgentClientPluginSettings {
 		maxNoteLength: number;
 		maxSelectionLength: number;
 		showEmojis: boolean;
+		fontSize: number | null;
 	};
 	// Locally saved session metadata (for agents without session/list support)
 	savedSessions: SavedSessionInfo[];
+	// Last used model per agent (agentId → modelId)
+	lastUsedModels: Record<string, string>;
+	// Floating chat button settings
+	showFloatingButton: boolean;
+	floatingButtonImage: string;
+	floatingWindowSize: { width: number; height: number };
+	floatingWindowPosition: { x: number; y: number } | null;
+	floatingButtonPosition: { x: number; y: number } | null;
 }
 
 const DEFAULT_SETTINGS: AgentClientPluginSettings = {
@@ -134,18 +162,35 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 		maxNoteLength: 10000,
 		maxSelectionLength: 10000,
 		showEmojis: true,
+		fontSize: null,
 	},
 	savedSessions: [],
+	lastUsedModels: {},
+	showFloatingButton: false,
+	floatingButtonImage: "",
+	floatingWindowSize: { width: 400, height: 500 },
+	floatingWindowPosition: null,
+	floatingButtonPosition: null,
 };
 
 export default class AgentClientPlugin extends Plugin {
 	settings: AgentClientPluginSettings;
 	settingsStore!: SettingsStore;
 
+	/** Registry for all chat view containers (sidebar + floating) */
+	viewRegistry = new ChatViewRegistry();
+
 	/** Map of viewId to AcpAdapter for multi-session support */
 	private _adapters: Map<string, AcpAdapter> = new Map();
-	/** Track the last active ChatView for keybind targeting */
-	private _lastActiveChatViewId: string | null = null;
+	/** Floating button container (independent from chat view instances) */
+	private floatingButton: FloatingButtonContainer | null = null;
+	/** Map of viewId to floating chat roots and containers (legacy, being migrated to viewRegistry) */
+	private floatingChatInstances: Map<
+		string,
+		{ root: Root; container: HTMLElement }
+	> = new Map();
+	/** Counter for generating unique floating chat instance IDs */
+	private floatingChatCounter = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -205,7 +250,60 @@ export default class AgentClientPlugin extends Plugin {
 		this.registerPermissionCommands();
 		this.registerBroadcastCommands();
 
+		// Floating chat window commands
+		this.addCommand({
+			id: "open-floating-chat",
+			name: "Open floating chat window",
+			callback: () => {
+				if (!this.settings.showFloatingButton) return;
+				const instances = this.getFloatingChatInstances();
+				if (instances.length === 0) {
+					this.openNewFloatingChat(true);
+				} else if (instances.length === 1) {
+					this.expandFloatingChat(instances[0]);
+				} else {
+					const focused = this.viewRegistry.getFocused();
+					if (focused && focused.viewType === "floating") {
+						focused.expand();
+					} else {
+						this.expandFloatingChat(
+							instances[instances.length - 1],
+						);
+					}
+				}
+			},
+		});
+
+		this.addCommand({
+			id: "open-new-floating-chat",
+			name: "Open new floating chat window",
+			callback: () => {
+				if (!this.settings.showFloatingButton) return;
+				this.openNewFloatingChat(true);
+			},
+		});
+
+		this.addCommand({
+			id: "close-floating-chat",
+			name: "Close floating chat window",
+			callback: () => {
+				const focused = this.viewRegistry.getFocused();
+				if (focused && focused.viewType === "floating") {
+					focused.collapse();
+				}
+			},
+		});
+
 		this.addSettingTab(new AgentClientSettingTab(this.app, this));
+
+		// Mount floating button (always present; visibility controlled by settings inside component)
+		this.floatingButton = new FloatingButtonContainer(this);
+		this.floatingButton.mount();
+
+		// Mount initial floating chat instance only if enabled
+		if (this.settings.showFloatingButton) {
+			this.openNewFloatingChat();
+		}
 
 		// Clean up all ACP sessions when Obsidian quits
 		// Note: We don't wait for disconnect to complete to avoid blocking quit
@@ -225,7 +323,24 @@ export default class AgentClientPlugin extends Plugin {
 		);
 	}
 
-	onunload() {}
+	onunload() {
+		// Unmount floating button
+		this.floatingButton?.unmount();
+		this.floatingButton = null;
+
+		// Unmount all floating chat instances via registry
+		for (const container of this.viewRegistry.getByType("floating")) {
+			if (container instanceof FloatingViewContainer) {
+				container.unmount();
+			}
+		}
+
+		// Clear registry (sidebar views are managed by Obsidian workspace)
+		this.viewRegistry.clear();
+
+		// Clear legacy storage
+		this.floatingChatInstances.clear();
+	}
 
 	/**
 	 * Get or create an AcpAdapter for a specific view.
@@ -257,17 +372,15 @@ export default class AgentClientPlugin extends Plugin {
 			}
 			this._adapters.delete(viewId);
 		}
-		// Clear lastActiveChatViewId if it was this view
-		if (this._lastActiveChatViewId === viewId) {
-			this._lastActiveChatViewId = null;
-		}
+		// Note: lastActiveChatViewId is now managed by viewRegistry
+		// Clearing happens automatically when view is unregistered
 	}
 
 	/**
 	 * Get the last active ChatView ID for keybind targeting.
 	 */
 	get lastActiveChatViewId(): string | null {
-		return this._lastActiveChatViewId;
+		return this.viewRegistry.getFocusedId();
 	}
 
 	/**
@@ -275,7 +388,9 @@ export default class AgentClientPlugin extends Plugin {
 	 * Called when a ChatView receives focus or interaction.
 	 */
 	setLastActiveChatViewId(viewId: string | null): void {
-		this._lastActiveChatViewId = viewId;
+		if (viewId) {
+			this.viewRegistry.setFocused(viewId);
+		}
 	}
 
 	async activateView() {
@@ -286,12 +401,11 @@ export default class AgentClientPlugin extends Plugin {
 
 		if (leaves.length > 0) {
 			// Find the leaf matching lastActiveChatViewId, or fall back to first leaf
-			if (this._lastActiveChatViewId) {
+			const focusedId = this.lastActiveChatViewId;
+			if (focusedId) {
 				leaf =
 					leaves.find(
-						(l) =>
-							(l.view as ChatView)?.viewId ===
-							this._lastActiveChatViewId,
+						(l) => (l.view as ChatView)?.viewId === focusedId,
 					) || leaves[0];
 			} else {
 				leaf = leaves[0];
@@ -331,43 +445,14 @@ export default class AgentClientPlugin extends Plugin {
 
 	/**
 	 * Focus the next or previous ChatView in the list.
-	 * Cycles through all ChatView leaves.
+	 * Uses ChatViewRegistry which includes both sidebar and floating views.
 	 */
 	private focusChatView(direction: "next" | "previous"): void {
-		const { workspace } = this.app;
-		const leaves = workspace.getLeavesOfType(VIEW_TYPE_CHAT);
-
-		if (leaves.length === 0) {
-			return;
+		if (direction === "next") {
+			this.viewRegistry.focusNext();
+		} else {
+			this.viewRegistry.focusPrevious();
 		}
-
-		if (leaves.length === 1) {
-			void workspace.revealLeaf(leaves[0]);
-			this.focusTextarea(leaves[0]);
-			return;
-		}
-
-		// Find current index
-		let currentIndex = 0;
-		if (this._lastActiveChatViewId) {
-			const foundIndex = leaves.findIndex(
-				(l) =>
-					(l.view as ChatView)?.viewId === this._lastActiveChatViewId,
-			);
-			if (foundIndex !== -1) {
-				currentIndex = foundIndex;
-			}
-		}
-
-		// Get target index (cycle)
-		const targetIndex =
-			direction === "next"
-				? (currentIndex + 1) % leaves.length
-				: (currentIndex - 1 + leaves.length) % leaves.length;
-		const targetLeaf = leaves[targetIndex];
-
-		void workspace.revealLeaf(targetLeaf);
-		this.focusTextarea(targetLeaf);
 	}
 
 	/**
@@ -380,14 +465,50 @@ export default class AgentClientPlugin extends Plugin {
 
 		switch (location) {
 			case "right-tab":
+				if (isAdditional) {
+					return this.createSidebarTab("right");
+				}
+				return workspace.getRightLeaf(false);
+			case "right-split":
 				return workspace.getRightLeaf(isAdditional);
 			case "editor-tab":
 				return workspace.getLeaf("tab");
 			case "editor-split":
 				return workspace.getLeaf("split");
 			default:
-				return workspace.getRightLeaf(isAdditional);
+				return workspace.getRightLeaf(false);
 		}
+	}
+
+	/**
+	 * Create a new tab within an existing sidebar tab group.
+	 * Uses the parent of an existing chat leaf to add a sibling tab,
+	 * avoiding the vertical split caused by getRightLeaf(true).
+	 */
+	private createSidebarTab(side: "right" | "left"): WorkspaceLeaf | null {
+		const { workspace } = this.app;
+		const split =
+			side === "right" ? workspace.rightSplit : workspace.leftSplit;
+
+		// Find an existing chat leaf in this sidebar to get its tab group
+		const existingLeaves = workspace.getLeavesOfType(VIEW_TYPE_CHAT);
+		const sidebarLeaf = existingLeaves.find(
+			(leaf) => leaf.getRoot() === split,
+		);
+
+		if (sidebarLeaf) {
+			const tabGroup = sidebarLeaf.parent;
+			// Index is clamped by Obsidian, so a large value appends to the end
+			return workspace.createLeafInParent(
+				tabGroup as unknown as WorkspaceSplit,
+				Number.MAX_SAFE_INTEGER,
+			);
+		}
+
+		// Fallback: no existing chat leaf in sidebar, create first one
+		return side === "right"
+			? workspace.getRightLeaf(false)
+			: workspace.getLeftLeaf(false);
 	}
 
 	/**
@@ -421,6 +542,63 @@ export default class AgentClientPlugin extends Plugin {
 				}
 			}, 0);
 		}
+	}
+
+	/**
+	 * Open a new floating chat window.
+	 * Each window is independent with its own session.
+	 */
+	openNewFloatingChat(
+		initialExpanded = false,
+		initialPosition?: { x: number; y: number },
+	): void {
+		// instanceId is just the counter (e.g., "0", "1", "2")
+		// FloatingViewContainer will create viewId as "floating-chat-{instanceId}"
+		const instanceId = String(this.floatingChatCounter++);
+		const container = createFloatingChat(
+			this,
+			instanceId,
+			initialExpanded,
+			initialPosition,
+		);
+		// Store by viewId for consistent lookup
+		this.floatingChatInstances.set(container.viewId, {
+			root: null as unknown as Root,
+			container: container.getContainerEl(),
+		});
+	}
+
+	/**
+	 * Close a specific floating chat window.
+	 * @param viewId - The viewId in "floating-chat-{id}" format (from getFloatingChatInstances())
+	 */
+	closeFloatingChat(viewId: string): void {
+		const container = this.viewRegistry.get(viewId);
+		if (container && container instanceof FloatingViewContainer) {
+			container.unmount();
+		}
+		// Also remove from legacy floatingChatInstances if present
+		this.floatingChatInstances.delete(viewId);
+	}
+
+	/**
+	 * Get all floating chat instance viewIds.
+	 * @returns Array of viewIds in "floating-chat-{id}" format
+	 */
+	getFloatingChatInstances(): string[] {
+		return this.viewRegistry.getByType("floating").map((v) => v.viewId);
+	}
+
+	/**
+	 * Expand a specific floating chat window by triggering a custom event.
+	 * @param viewId - The viewId in "floating-chat-{id}" format (from getFloatingChatInstances())
+	 */
+	expandFloatingChat(viewId: string): void {
+		window.dispatchEvent(
+			new CustomEvent("agent-client:expand-floating-chat", {
+				detail: { viewId },
+			}),
+		);
 	}
 
 	/**
@@ -486,10 +664,17 @@ export default class AgentClientPlugin extends Plugin {
 			id: "approve-active-permission",
 			name: "Approve active permission",
 			callback: async () => {
-				await this.activateView();
+				// Only activate sidebar view if the focused view is a sidebar
+				// (avoid stealing focus from floating views)
+				const focusedId = this.lastActiveChatViewId;
+				const isFloatingFocused =
+					focusedId?.startsWith("floating-chat-");
+				if (!isFloatingFocused) {
+					await this.activateView();
+				}
 				this.app.workspace.trigger(
 					"agent-client:approve-active-permission" as "quit",
-					this._lastActiveChatViewId,
+					this.lastActiveChatViewId,
 				);
 			},
 		});
@@ -498,10 +683,17 @@ export default class AgentClientPlugin extends Plugin {
 			id: "reject-active-permission",
 			name: "Reject active permission",
 			callback: async () => {
-				await this.activateView();
+				// Only activate sidebar view if the focused view is a sidebar
+				// (avoid stealing focus from floating views)
+				const focusedId = this.lastActiveChatViewId;
+				const isFloatingFocused =
+					focusedId?.startsWith("floating-chat-");
+				if (!isFloatingFocused) {
+					await this.activateView();
+				}
 				this.app.workspace.trigger(
 					"agent-client:reject-active-permission" as "quit",
-					this._lastActiveChatViewId,
+					this.lastActiveChatViewId,
 				);
 			},
 		});
@@ -510,10 +702,17 @@ export default class AgentClientPlugin extends Plugin {
 			id: "toggle-auto-mention",
 			name: "Toggle auto-mention",
 			callback: async () => {
-				await this.activateView();
+				// Only activate sidebar view if the focused view is a sidebar
+				// (avoid stealing focus from floating views)
+				const focusedId = this.lastActiveChatViewId;
+				const isFloatingFocused =
+					focusedId?.startsWith("floating-chat-");
+				if (!isFloatingFocused) {
+					await this.activateView();
+				}
 				this.app.workspace.trigger(
 					"agent-client:toggle-auto-mention" as "quit",
-					this._lastActiveChatViewId,
+					this.lastActiveChatViewId,
 				);
 			},
 		});
@@ -524,7 +723,7 @@ export default class AgentClientPlugin extends Plugin {
 			callback: () => {
 				this.app.workspace.trigger(
 					"agent-client:cancel-message" as "quit",
-					this._lastActiveChatViewId,
+					this.lastActiveChatViewId,
 				);
 			},
 		});
@@ -566,23 +765,15 @@ export default class AgentClientPlugin extends Plugin {
 	 * Copy prompt from active view to all other views
 	 */
 	private broadcastPrompt(): void {
-		const allChatViews = this.getAllChatViews();
-		if (allChatViews.length === 0) {
+		const allViews = this.viewRegistry.getAll();
+		if (allViews.length === 0) {
 			new Notice("[Agent Client] No chat views open");
 			return;
 		}
 
-		// Find the active (source) view
-		const activeViewId = this._lastActiveChatViewId;
-		const sourceView = allChatViews.find((v) => v.viewId === activeViewId);
-
-		if (!sourceView) {
-			new Notice("[Agent Client] No active chat view found");
-			return;
-		}
-
-		// Get input state from source view
-		const inputState = sourceView.getInputState();
+		const inputState = this.viewRegistry.toFocused((v) =>
+			v.getInputState(),
+		);
 		if (
 			!inputState ||
 			(inputState.text.trim() === "" && inputState.images.length === 0)
@@ -591,10 +782,8 @@ export default class AgentClientPlugin extends Plugin {
 			return;
 		}
 
-		// Broadcast to all other views
-		const targetViews = allChatViews.filter(
-			(v) => v.viewId !== activeViewId,
-		);
+		const focusedId = this.viewRegistry.getFocusedId();
+		const targetViews = allViews.filter((v) => v.viewId !== focusedId);
 		if (targetViews.length === 0) {
 			new Notice("[Agent Client] No other chat views to broadcast to");
 			return;
@@ -609,20 +798,18 @@ export default class AgentClientPlugin extends Plugin {
 	 * Send message in all views that can send
 	 */
 	private async broadcastSend(): Promise<void> {
-		const allChatViews = this.getAllChatViews();
-		if (allChatViews.length === 0) {
+		const allViews = this.viewRegistry.getAll();
+		if (allViews.length === 0) {
 			new Notice("[Agent Client] No chat views open");
 			return;
 		}
 
-		// Filter to views that can send
-		const sendableViews = allChatViews.filter((v) => v.canSend());
+		const sendableViews = allViews.filter((v) => v.canSend());
 		if (sendableViews.length === 0) {
 			new Notice("[Agent Client] No views ready to send");
 			return;
 		}
 
-		// Send in all views concurrently
 		await Promise.allSettled(sendableViews.map((v) => v.sendMessage()));
 	}
 
@@ -630,26 +817,14 @@ export default class AgentClientPlugin extends Plugin {
 	 * Cancel operation in all views
 	 */
 	private async broadcastCancel(): Promise<void> {
-		const allChatViews = this.getAllChatViews();
-		if (allChatViews.length === 0) {
+		const allViews = this.viewRegistry.getAll();
+		if (allViews.length === 0) {
 			new Notice("[Agent Client] No chat views open");
 			return;
 		}
 
-		// Cancel in all views concurrently
-		await Promise.allSettled(allChatViews.map((v) => v.cancelOperation()));
-
+		await Promise.allSettled(allViews.map((v) => v.cancelOperation()));
 		new Notice("[Agent Client] Cancel broadcast to all views");
-	}
-
-	/**
-	 * Get all open ChatView instances
-	 */
-	private getAllChatViews(): ChatView[] {
-		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT);
-		return leaves
-			.map((leaf) => leaf.view)
-			.filter((view): view is ChatView => view instanceof ChatView);
 	}
 
 	async loadSettings() {
@@ -869,6 +1044,7 @@ export default class AgentClientPlugin extends Plugin {
 					: DEFAULT_SETTINGS.sendMessageShortcut,
 			chatViewLocation:
 				rawSettings.chatViewLocation === "right-tab" ||
+				rawSettings.chatViewLocation === "right-split" ||
 				rawSettings.chatViewLocation === "editor-tab" ||
 				rawSettings.chatViewLocation === "editor-split"
 					? rawSettings.chatViewLocation
@@ -907,6 +1083,7 @@ export default class AgentClientPlugin extends Plugin {
 							typeof rawDisplay.showEmojis === "boolean"
 								? rawDisplay.showEmojis
 								: DEFAULT_SETTINGS.displaySettings.showEmojis,
+						fontSize: parseChatFontSize(rawDisplay.fontSize),
 					};
 				}
 				return DEFAULT_SETTINGS.displaySettings;
@@ -914,6 +1091,79 @@ export default class AgentClientPlugin extends Plugin {
 			savedSessions: Array.isArray(rawSettings.savedSessions)
 				? (rawSettings.savedSessions as SavedSessionInfo[])
 				: DEFAULT_SETTINGS.savedSessions,
+			lastUsedModels: (() => {
+				const raw = rawSettings.lastUsedModels;
+				if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+					const result: Record<string, string> = {};
+					for (const [key, value] of Object.entries(
+						raw as Record<string, unknown>,
+					)) {
+						if (
+							typeof key === "string" &&
+							key.length > 0 &&
+							typeof value === "string" &&
+							value.length > 0
+						) {
+							result[key] = value;
+						}
+					}
+					return result;
+				}
+				return DEFAULT_SETTINGS.lastUsedModels;
+			})(),
+			showFloatingButton:
+				typeof rawSettings.showFloatingButton === "boolean"
+					? rawSettings.showFloatingButton
+					: DEFAULT_SETTINGS.showFloatingButton,
+			floatingButtonImage:
+				typeof rawSettings.floatingButtonImage === "string"
+					? rawSettings.floatingButtonImage
+					: DEFAULT_SETTINGS.floatingButtonImage,
+			floatingWindowSize: (() => {
+				const raw = rawSettings.floatingWindowSize as
+					| { width?: number; height?: number }
+					| null
+					| undefined;
+				if (
+					raw &&
+					typeof raw === "object" &&
+					typeof raw.width === "number" &&
+					typeof raw.height === "number"
+				) {
+					return { width: raw.width, height: raw.height };
+				}
+				return DEFAULT_SETTINGS.floatingWindowSize;
+			})(),
+			floatingWindowPosition: (() => {
+				const raw = rawSettings.floatingWindowPosition as
+					| { x?: number; y?: number }
+					| null
+					| undefined;
+				if (
+					raw &&
+					typeof raw === "object" &&
+					typeof raw.x === "number" &&
+					typeof raw.y === "number"
+				) {
+					return { x: raw.x, y: raw.y };
+				}
+				return null;
+			})(),
+			floatingButtonPosition: (() => {
+				const raw = rawSettings.floatingButtonPosition as
+					| { x?: number; y?: number }
+					| null
+					| undefined;
+				if (
+					raw &&
+					typeof raw === "object" &&
+					typeof raw.x === "number" &&
+					typeof raw.y === "number"
+				) {
+					return { x: raw.x, y: raw.y };
+				}
+				return null;
+			})(),
 		};
 
 		this.ensureDefaultAgentId();

@@ -1,12 +1,10 @@
-import {
-	ItemView,
-	WorkspaceLeaf,
-	Platform,
-	Notice,
-	FileSystemAdapter,
-} from "obsidian";
+import { ItemView, WorkspaceLeaf, Platform, Notice, Menu } from "obsidian";
+import type {
+	IChatViewContainer,
+	ChatViewType,
+} from "../../domain/ports/chat-view-container.port";
 import * as React from "react";
-const { useState, useRef, useEffect, useMemo, useCallback } = React;
+const { useState, useRef, useEffect, useCallback } = React;
 import { createRoot, Root } from "react-dom/client";
 
 import type AgentClientPlugin from "../../plugin";
@@ -16,38 +14,16 @@ import type { ChatInputState } from "../../domain/models/chat-input-state";
 import { ChatHeader } from "./ChatHeader";
 import { ChatMessages } from "./ChatMessages";
 import { ChatInput } from "./ChatInput";
-import type { AttachedImage } from "./ImagePreviewStrip";
-import { SessionHistoryModal } from "./SessionHistoryModal";
-import { ConfirmDeleteModal } from "./ConfirmDeleteModal";
-import { HeaderMenu } from "./HeaderMenu";
-
-// Service imports
-import { NoteMentionService } from "../../adapters/obsidian/mention-service";
-
 // Utility imports
 import { getLogger, Logger } from "../../shared/logger";
-import { ChatExporter } from "../../shared/chat-exporter";
 
 // Adapter imports
 import type { IAcpClient } from "../../adapters/acp/acp.adapter";
-import { ObsidianVaultAdapter } from "../../adapters/obsidian/vault.adapter";
 
 // Hooks imports
-import { useSettings } from "../../hooks/useSettings";
-import { useMentions } from "../../hooks/useMentions";
-import { useSlashCommands } from "../../hooks/useSlashCommands";
-import { useAutoMention } from "../../hooks/useAutoMention";
-import { useAgentSession } from "../../hooks/useAgentSession";
-import { useChat } from "../../hooks/useChat";
-import { usePermission } from "../../hooks/usePermission";
-import { useAutoExport } from "../../hooks/useAutoExport";
-import { useSessionHistory } from "../../hooks/useSessionHistory";
+import { useChatController } from "../../hooks/useChatController";
 
 // Domain model imports
-import type {
-	SessionModeState,
-	SessionModelState,
-} from "../../domain/models/chat-session";
 import type { ImagePromptContent } from "../../domain/models/prompt-content";
 
 // Type definitions for Obsidian internal APIs
@@ -77,32 +53,74 @@ function ChatComponent({
 	}
 
 	// ============================================================
-	// Memoized Services & Adapters
+	// Agent ID State (synced with Obsidian view state)
+	// Must be defined before useChatController to pass as initialAgentId
 	// ============================================================
-	const logger = getLogger();
-
-	const vaultPath = useMemo(() => {
-		const adapter = plugin.app.vault.adapter;
-		if (adapter instanceof FileSystemAdapter) {
-			return adapter.getBasePath();
-		}
-		// Fallback for non-FileSystemAdapter (e.g., mobile)
-		return process.cwd();
-	}, [plugin]);
-
-	const noteMentionService = useMemo(
-		() => new NoteMentionService(plugin),
-		[plugin],
+	const [restoredAgentId, setRestoredAgentId] = useState<string | undefined>(
+		view.getInitialAgentId() ?? undefined,
 	);
 
-	// Cleanup NoteMentionService when component unmounts
-	useEffect(() => {
-		return () => {
-			noteMentionService.destroy();
-		};
-	}, [noteMentionService]);
+	// ============================================================
+	// Chat Controller Hook (Centralized Logic)
+	// ============================================================
+	const controller = useChatController({
+		plugin,
+		viewId,
+		initialAgentId: restoredAgentId,
+	});
 
-	// Track this view as the last active when it receives focus or interaction
+	const {
+		logger,
+		acpAdapter,
+		settings,
+		session,
+		isSessionReady,
+		messages,
+		isSending,
+		isUpdateAvailable,
+		permission,
+		mentions,
+		autoMention,
+		slashCommands,
+		sessionHistory,
+		activeAgentLabel,
+		availableAgents,
+		errorInfo,
+		handleSendMessage,
+		handleStopGeneration,
+		handleNewChat,
+		handleExportChat,
+		handleRestartAgent,
+		handleClearError,
+		handleOpenHistory,
+		handleSetMode,
+		handleSetModel,
+		inputValue,
+		setInputValue,
+		attachedImages,
+		setAttachedImages,
+		restoredMessage,
+		handleRestoredMessageConsumed,
+	} = controller;
+
+	// ============================================================
+	// Agent ID Restoration (ChatView-specific)
+	// Subscribe to agentId restoration from Obsidian's setState
+	// Note: logger is now available from controller
+	// ============================================================
+	useEffect(() => {
+		const unsubscribe = view.onAgentIdRestored((agentId) => {
+			logger.log(
+				`[ChatView] Agent ID restored from workspace: ${agentId}`,
+			);
+			setRestoredAgentId(agentId);
+		});
+		return unsubscribe;
+	}, [view, logger]);
+
+	// ============================================================
+	// Focus Tracking (ChatView-specific)
+	// ============================================================
 	useEffect(() => {
 		const handleFocus = () => {
 			plugin.setLastActiveChatViewId(viewId);
@@ -121,286 +139,30 @@ function ChatComponent({
 		};
 	}, [plugin, viewId, view.containerEl]);
 
-	const acpAdapter = useMemo(
-		() => plugin.getOrCreateAdapter(viewId),
-		[plugin, viewId],
-	);
-	const acpClientRef = useRef<IAcpClient>(acpAdapter);
-
-	const vaultAccessAdapter = useMemo(() => {
-		return new ObsidianVaultAdapter(plugin, noteMentionService);
-	}, [plugin, noteMentionService]);
-
-	// ============================================================
-	// Custom Hooks
-	// ============================================================
-	const settings = useSettings(plugin);
-
-	// ============================================================
-	// Agent ID State (synced with Obsidian view state)
-	// ============================================================
-	// Start with view's current value (may be null on initial mount before setState)
-	const [restoredAgentId, setRestoredAgentId] = useState<string | undefined>(
-		view.getInitialAgentId() ?? undefined,
-	);
-
-	// Subscribe to agentId restoration from Obsidian's setState
-	useEffect(() => {
-		const unsubscribe = view.onAgentIdRestored((agentId) => {
-			logger.log(
-				`[ChatView] Agent ID restored from workspace: ${agentId}`,
-			);
-			setRestoredAgentId(agentId);
-		});
-		return unsubscribe;
-	}, [view, logger]);
-
-	const agentSession = useAgentSession(
-		acpAdapter,
-		plugin.settingsStore,
-		vaultPath,
-		restoredAgentId,
-	);
-
-	const {
-		session,
-		errorInfo: sessionErrorInfo,
-		isReady: isSessionReady,
-	} = agentSession;
-
-	const chat = useChat(
-		acpAdapter,
-		vaultAccessAdapter,
-		noteMentionService,
-		{
-			sessionId: session.sessionId,
-			authMethods: session.authMethods,
-			promptCapabilities: session.promptCapabilities,
-		},
-		{
-			windowsWslMode: settings.windowsWslMode,
-			maxNoteLength: settings.displaySettings.maxNoteLength,
-			maxSelectionLength: settings.displaySettings.maxSelectionLength,
-		},
-	);
-
-	const { messages, isSending } = chat;
-
-	const permission = usePermission(acpAdapter, messages);
-
-	const mentions = useMentions(vaultAccessAdapter, plugin);
-	const autoMention = useAutoMention(vaultAccessAdapter);
-	const slashCommands = useSlashCommands(
-		session.availableCommands || [],
-		autoMention.toggle,
-	);
-
-	const autoExport = useAutoExport(plugin);
-
-	// Session history hook with callback for session load
-	// Session load callback - called when a session is loaded/resumed/forked from history
-	// Note: Conversation history is received via session/update notifications for load
-	const handleSessionLoad = useCallback(
-		(
-			sessionId: string,
-			modes?: SessionModeState,
-			models?: SessionModelState,
-		) => {
-			// Log that session was loaded
-			logger.log(
-				`[ChatView] Session loaded/resumed/forked: ${sessionId}`,
-				{
-					modes,
-					models,
-				},
-			);
-
-			// Update session state with new session ID and modes/models
-			// This is critical for session/update notifications to be accepted
-			agentSession.updateSessionFromLoad(sessionId, modes, models);
-
-			// Conversation history for load is received via session/update notifications
-			// but we ignore them and use local history instead (see handleLoadStart/handleLoadEnd)
-		},
-		[logger, agentSession],
-	);
-
-	/**
-	 * Called when session/load starts.
-	 * Sets flag to ignore history replay messages from agent.
-	 */
-	const handleLoadStart = useCallback(() => {
-		logger.log("[ChatView] session/load started, ignoring history replay");
-		setIsLoadingSessionHistory(true);
-		// Clear existing messages before loading local history
-		chat.clearMessages();
-	}, [logger, chat]);
-
-	/**
-	 * Called when session/load ends.
-	 * Clears flag to resume normal message processing.
-	 */
-	const handleLoadEnd = useCallback(() => {
-		logger.log("[ChatView] session/load ended, resuming normal processing");
-		setIsLoadingSessionHistory(false);
-	}, [logger]);
-
-	const sessionHistory = useSessionHistory({
-		agentClient: acpAdapter,
-		session,
-		settingsAccess: plugin.settingsStore,
-		cwd: vaultPath,
-		onSessionLoad: handleSessionLoad,
-		onMessagesRestore: chat.setMessagesFromLocal,
-		onLoadStart: handleLoadStart,
-		onLoadEnd: handleLoadEnd,
-	});
-
-	// Combined error info (session errors take precedence)
-	const errorInfo =
-		sessionErrorInfo || chat.errorInfo || permission.errorInfo;
-
-	// ============================================================
-	// Local State
-	// ============================================================
-	const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
-	const [restoredMessage, setRestoredMessage] = useState<string | null>(null);
-	/** Flag to ignore history replay messages during session/load */
-	const [isLoadingSessionHistory, setIsLoadingSessionHistory] =
-		useState(false);
-	/** Whether the settings menu is open */
-	const [isMenuOpen, setIsMenuOpen] = useState(false);
-
-	// ============================================================
-	// Input State (lifted from ChatInput for broadcast commands)
-	// ============================================================
-	const [inputValue, setInputValue] = useState("");
-	const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
-
 	// ============================================================
 	// Refs
 	// ============================================================
-	/** Ref for session history modal (persisted across renders) */
-	const historyModalRef = useRef<SessionHistoryModal | null>(null);
-	/** Ref for settings button (for menu positioning) */
-	const menuButtonRef = useRef<HTMLButtonElement>(null);
+	const acpClientRef = useRef<IAcpClient>(acpAdapter);
 	/** Track if initial agent restoration has been performed (prevent re-triggering) */
 	const hasRestoredAgentRef = useRef(false);
 
 	// ============================================================
-	// Computed Values
+	// ChatView-specific Callbacks
 	// ============================================================
-	const activeAgentLabel = useMemo(() => {
-		const activeId = session.agentId;
-		if (activeId === plugin.settings.claude.id) {
-			return (
-				plugin.settings.claude.displayName || plugin.settings.claude.id
-			);
-		}
-		if (activeId === plugin.settings.codex.id) {
-			return (
-				plugin.settings.codex.displayName || plugin.settings.codex.id
-			);
-		}
-		if (activeId === plugin.settings.gemini.id) {
-			return (
-				plugin.settings.gemini.displayName || plugin.settings.gemini.id
-			);
-		}
-		const custom = plugin.settings.customAgents.find(
-			(agent) => agent.id === activeId,
-		);
-		return custom?.displayName || custom?.id || activeId;
-	}, [session.agentId, plugin.settings]);
 
-	// ============================================================
-	// Callbacks
-	// ============================================================
-	/**
-	 * Handle new chat request.
-	 * @param requestedAgentId - If provided, switch to this agent (from "New chat with [Agent]" command)
-	 */
-	const handleNewChat = useCallback(
+	// ChatView-specific handleNewChat wrapper (also persists agent ID via view.setAgentId)
+	// If requestedAgentId is provided, use it; otherwise keep the current agent
+	const handleNewChatWithPersist = useCallback(
 		async (requestedAgentId?: string) => {
-			const isAgentSwitch =
-				requestedAgentId && requestedAgentId !== session.agentId;
-
-			// Skip if already empty AND not switching agents
-			if (messages.length === 0 && !isAgentSwitch) {
-				new Notice("[Agent Client] Already a new session");
-				return;
-			}
-
-			// Cancel ongoing generation before starting new chat
-			if (chat.isSending) {
-				await agentSession.cancelOperation();
-			}
-
-			logger.log(
-				`[Debug] Creating new session${isAgentSwitch ? ` with agent: ${requestedAgentId}` : ""}...`,
-			);
-
-			// Auto-export current chat before starting new one (if has messages)
-			if (messages.length > 0) {
-				await autoExport.autoExportIfEnabled(
-					"newChat",
-					messages,
-					session,
-				);
-			}
-
-			autoMention.toggle(false);
-			chat.clearMessages();
-
-			const newAgentId = isAgentSwitch
-				? requestedAgentId
-				: session.agentId;
-			await agentSession.restartSession(newAgentId);
-
+			await handleNewChat(requestedAgentId);
 			// Persist agent ID for this view (survives Obsidian restart)
-			if (newAgentId) {
-				view.setAgentId(newAgentId);
+			// Use requestedAgentId if provided; otherwise current session.agentId (effectively no-op)
+			if (requestedAgentId) {
+				view.setAgentId(requestedAgentId);
 			}
-
-			// Invalidate session history cache when creating new session
-			sessionHistory.invalidateCache();
 		},
-		[
-			messages,
-			session,
-			logger,
-			autoExport,
-			autoMention,
-			chat,
-			agentSession,
-			sessionHistory,
-			view,
-		],
+		[handleNewChat, view],
 	);
-
-	const handleExportChat = useCallback(async () => {
-		if (messages.length === 0) {
-			new Notice("[Agent Client] No messages to export");
-			return;
-		}
-
-		try {
-			const exporter = new ChatExporter(plugin);
-			const openFile = plugin.settings.exportSettings.openFileAfterExport;
-			const filePath = await exporter.exportToMarkdown(
-				messages,
-				session.agentDisplayName,
-				session.agentId,
-				session.sessionId || "unknown",
-				session.createdAt,
-				openFile,
-			);
-			new Notice(`[Agent Client] Chat exported to ${filePath}`);
-		} catch (error) {
-			new Notice("[Agent Client] Failed to export chat");
-			logger.error("Export error:", error);
-		}
-	}, [messages, session, plugin, logger]);
 
 	const handleOpenSettings = useCallback(() => {
 		const appWithSettings = plugin.app as unknown as AppWithSettings;
@@ -409,271 +171,98 @@ function ChatComponent({
 	}, [plugin]);
 
 	// ============================================================
-	// Header Menu Callbacks
+	// Header Menu (Obsidian native Menu API)
 	// ============================================================
-	const handleToggleMenu = useCallback(() => {
-		setIsMenuOpen((prev) => !prev);
-	}, []);
+	const handleShowMenu = useCallback(
+		(e: React.MouseEvent<HTMLButtonElement>) => {
+			const menu = new Menu();
 
-	const handleCloseMenu = useCallback(() => {
-		setIsMenuOpen(false);
-	}, []);
-
-	const handleSwitchAgent = useCallback(
-		(agentId: string) => {
-			setIsMenuOpen(false);
-			if (agentId !== session.agentId) {
-				void handleNewChat(agentId);
-			}
-		},
-		[session.agentId, handleNewChat],
-	);
-
-	const handleRestartAgent = useCallback(() => {
-		setIsMenuOpen(false);
-		void (async () => {
-			logger.log("[ChatView] Restarting agent process...");
-
-			// Auto-export current chat before restart (if has messages)
-			if (messages.length > 0) {
-				await autoExport.autoExportIfEnabled(
-					"newChat",
-					messages,
-					session,
-				);
-			}
-
-			// Clear messages for fresh start
-			chat.clearMessages();
-
-			try {
-				await agentSession.forceRestartAgent();
-				new Notice("[Agent Client] Agent restarted");
-			} catch (error) {
-				new Notice("[Agent Client] Failed to restart agent");
-				logger.error("Restart error:", error);
-			}
-		})();
-	}, [logger, messages, session, autoExport, chat, agentSession]);
-
-	const handleOpenNewView = useCallback(() => {
-		setIsMenuOpen(false);
-		void plugin.openNewChatViewWithAgent(plugin.settings.defaultAgentId);
-	}, [plugin]);
-
-	/** Get available agents for settings menu */
-	const availableAgents = useMemo(() => {
-		return plugin.getAvailableAgents();
-	}, [plugin]);
-
-	// ============================================================
-	// Session History Modal Callbacks
-	// ============================================================
-	const handleHistoryRestoreSession = useCallback(
-		async (sessionId: string, cwd: string) => {
-			try {
-				logger.log(`[ChatView] Restoring session: ${sessionId}`);
-				chat.clearMessages();
-				await sessionHistory.restoreSession(sessionId, cwd);
-				new Notice("[Agent Client] Session restored");
-			} catch (error) {
-				new Notice("[Agent Client] Failed to restore session");
-				logger.error("Session restore error:", error);
-			}
-		},
-		[logger, chat, sessionHistory],
-	);
-
-	const handleHistoryForkSession = useCallback(
-		async (sessionId: string, cwd: string) => {
-			try {
-				logger.log(`[ChatView] Forking session: ${sessionId}`);
-				chat.clearMessages();
-				await sessionHistory.forkSession(sessionId, cwd);
-				new Notice("[Agent Client] Session forked");
-			} catch (error) {
-				new Notice("[Agent Client] Failed to fork session");
-				logger.error("Session fork error:", error);
-			}
-		},
-		[logger, chat, sessionHistory],
-	);
-
-	const handleHistoryDeleteSession = useCallback(
-		(sessionId: string) => {
-			const targetSession = sessionHistory.sessions.find(
-				(s) => s.sessionId === sessionId,
-			);
-			const sessionTitle = targetSession?.title ?? "Untitled Session";
-
-			const confirmModal = new ConfirmDeleteModal(
-				plugin.app,
-				sessionTitle,
-				async () => {
-					try {
-						logger.log(`[ChatView] Deleting session: ${sessionId}`);
-						await sessionHistory.deleteSession(sessionId);
-						new Notice("[Agent Client] Session deleted");
-					} catch (error) {
-						new Notice("[Agent Client] Failed to delete session");
-						logger.error("Session delete error:", error);
-					}
-				},
-			);
-			confirmModal.open();
-		},
-		[plugin.app, sessionHistory, logger],
-	);
-
-	const handleHistoryLoadMore = useCallback(() => {
-		void sessionHistory.loadMoreSessions();
-	}, [sessionHistory]);
-
-	const handleHistoryFetchSessions = useCallback(
-		(cwd?: string) => {
-			void sessionHistory.fetchSessions(cwd);
-		},
-		[sessionHistory],
-	);
-
-	const handleOpenHistory = useCallback(() => {
-		// Create modal if it doesn't exist
-		if (!historyModalRef.current) {
-			historyModalRef.current = new SessionHistoryModal(plugin.app, {
-				sessions: sessionHistory.sessions,
-				loading: sessionHistory.loading,
-				error: sessionHistory.error,
-				hasMore: sessionHistory.hasMore,
-				currentCwd: vaultPath,
-				canList: sessionHistory.canList,
-				canRestore: sessionHistory.canRestore,
-				canFork: sessionHistory.canFork,
-				isUsingLocalSessions: sessionHistory.isUsingLocalSessions,
-				localSessionIds: sessionHistory.localSessionIds,
-				isAgentReady: isSessionReady,
-				debugMode: settings.debugMode,
-				onRestoreSession: handleHistoryRestoreSession,
-				onForkSession: handleHistoryForkSession,
-				onDeleteSession: handleHistoryDeleteSession,
-				onLoadMore: handleHistoryLoadMore,
-				onFetchSessions: handleHistoryFetchSessions,
-			});
-		}
-		historyModalRef.current.open();
-		void sessionHistory.fetchSessions(vaultPath);
-	}, [
-		plugin.app,
-		sessionHistory,
-		vaultPath,
-		isSessionReady,
-		settings.debugMode,
-		handleHistoryRestoreSession,
-		handleHistoryForkSession,
-		handleHistoryDeleteSession,
-		handleHistoryLoadMore,
-		handleHistoryFetchSessions,
-	]);
-
-	// Update modal props when session history state changes
-	useEffect(() => {
-		if (historyModalRef.current) {
-			historyModalRef.current.updateProps({
-				sessions: sessionHistory.sessions,
-				loading: sessionHistory.loading,
-				error: sessionHistory.error,
-				hasMore: sessionHistory.hasMore,
-				currentCwd: vaultPath,
-				canList: sessionHistory.canList,
-				canRestore: sessionHistory.canRestore,
-				canFork: sessionHistory.canFork,
-				isUsingLocalSessions: sessionHistory.isUsingLocalSessions,
-				localSessionIds: sessionHistory.localSessionIds,
-				isAgentReady: isSessionReady,
-				debugMode: settings.debugMode,
-				onRestoreSession: handleHistoryRestoreSession,
-				onForkSession: handleHistoryForkSession,
-				onDeleteSession: handleHistoryDeleteSession,
-				onLoadMore: handleHistoryLoadMore,
-				onFetchSessions: handleHistoryFetchSessions,
-			});
-		}
-	}, [
-		sessionHistory.sessions,
-		sessionHistory.loading,
-		sessionHistory.error,
-		sessionHistory.hasMore,
-		sessionHistory.canList,
-		sessionHistory.canRestore,
-		sessionHistory.canFork,
-		sessionHistory.isUsingLocalSessions,
-		sessionHistory.localSessionIds,
-		vaultPath,
-		isSessionReady,
-		settings.debugMode,
-		handleHistoryRestoreSession,
-		handleHistoryForkSession,
-		handleHistoryDeleteSession,
-		handleHistoryLoadMore,
-		handleHistoryFetchSessions,
-	]);
-
-	const handleSendMessage = useCallback(
-		async (content: string, images?: ImagePromptContent[]) => {
-			const isFirstMessage = messages.length === 0;
-
-			await chat.sendMessage(content, {
-				// TODO: Refactor to handle settings inside useAutoMention hook
-				// Current: Pass null when setting is OFF to disable auto-mention
-				// Ideal: useAutoMention should accept settings and return effective values
-				activeNote: settings.autoMentionActiveNote
-					? autoMention.activeNote
-					: null,
-				vaultBasePath: vaultPath,
-				isAutoMentionDisabled: autoMention.isDisabled,
-				images,
+			// -- Switch agent section --
+			menu.addItem((item) => {
+				item.setTitle("Switch agent").setIsLabel(true);
 			});
 
-			// Save session metadata locally on first message
-			if (isFirstMessage && session.sessionId) {
-				await sessionHistory.saveSessionLocally(
-					session.sessionId,
-					content,
-				);
-				logger.log(
-					`[ChatView] Session saved locally: ${session.sessionId}`,
-				);
+			for (const agent of availableAgents) {
+				menu.addItem((item) => {
+					item.setTitle(agent.displayName)
+						.setChecked(agent.id === (session.agentId || ""))
+						.onClick(() => {
+							void handleNewChatWithPersist(agent.id);
+						});
+				});
 			}
+
+			menu.addSeparator();
+
+			// -- Actions section --
+			menu.addItem((item) => {
+				item.setTitle("Open new view")
+					.setIcon("plus")
+					.onClick(() => {
+						void plugin.openNewChatViewWithAgent(
+							plugin.settings.defaultAgentId,
+						);
+					});
+			});
+
+			menu.addItem((item) => {
+				item.setTitle("Restart agent")
+					.setIcon("refresh-cw")
+					.onClick(() => {
+						void handleRestartAgent();
+					});
+			});
+
+			menu.addSeparator();
+
+			menu.addItem((item) => {
+				item.setTitle("Plugin settings")
+					.setIcon("settings")
+					.onClick(() => {
+						handleOpenSettings();
+					});
+			});
+
+			menu.showAtMouseEvent(e.nativeEvent);
 		},
 		[
-			chat,
-			autoMention,
+			availableAgents,
+			session.agentId,
+			handleNewChatWithPersist,
 			plugin,
-			messages.length,
-			session.sessionId,
-			sessionHistory,
-			logger,
-			settings.autoMentionActiveNote,
+			handleRestartAgent,
+			handleOpenSettings,
 		],
 	);
 
-	const handleStopGeneration = useCallback(async () => {
-		logger.log("Cancelling current operation...");
-		// Save last user message before cancel (to restore it)
-		const lastMessage = chat.lastUserMessage;
-		await agentSession.cancelOperation();
-		// Restore the last user message to input field
-		if (lastMessage) {
-			setRestoredMessage(lastMessage);
-		}
-	}, [logger, agentSession, chat.lastUserMessage]);
+	// ============================================================
+	// Agent ID Restoration Effect (ChatView-specific)
+	// ============================================================
+	// Re-create session when agentId is restored from workspace state
+	// This handles the case where setState() is called after onOpen()
+	// Only runs ONCE for initial restoration (prevents re-triggering on agent switch)
+	useEffect(() => {
+		if (hasRestoredAgentRef.current) return;
+		if (!restoredAgentId) return;
+		if (session.state === "initializing") return;
 
-	const handleClearError = useCallback(() => {
-		chat.clearError();
-	}, [chat]);
+		hasRestoredAgentRef.current = true;
 
-	const handleRestoredMessageConsumed = useCallback(() => {
-		setRestoredMessage(null);
-	}, []);
+		if (session.agentId === restoredAgentId) return;
+
+		logger.log(
+			`[ChatView] Switching to restored agent: ${restoredAgentId} (current: ${session.agentId})`,
+		);
+		// Note: useChatController handles session creation, but we need to restart
+		// with the correct agent if it differs
+		void handleNewChat(restoredAgentId);
+	}, [
+		restoredAgentId,
+		session.state,
+		session.agentId,
+		logger,
+		handleNewChat,
+	]);
 
 	// ============================================================
 	// Broadcast Command Callbacks
@@ -687,10 +276,13 @@ function ChatComponent({
 	}, [inputValue, attachedImages]);
 
 	/** Set input state from broadcast commands */
-	const setInputState = useCallback((state: ChatInputState) => {
-		setInputValue(state.text);
-		setAttachedImages(state.images);
-	}, []);
+	const setInputState = useCallback(
+		(state: ChatInputState) => {
+			setInputValue(state.text);
+			setAttachedImages(state.images);
+		},
+		[setInputValue, setAttachedImages],
+	);
 
 	/** Send message for broadcast commands (returns true if sent) */
 	const sendMessageForBroadcast = useCallback(async (): Promise<boolean> => {
@@ -731,6 +323,8 @@ function ChatComponent({
 		sessionHistory.loading,
 		isSending,
 		handleSendMessage,
+		setInputValue,
+		setAttachedImages,
 	]);
 
 	/** Check if this view can send a message */
@@ -761,6 +355,7 @@ function ChatComponent({
 	// Register callbacks with ChatView class for broadcast commands
 	useEffect(() => {
 		view.registerInputCallbacks({
+			getDisplayName: () => activeAgentLabel,
 			getInputState,
 			setInputState,
 			sendMessage: sendMessageForBroadcast,
@@ -773,196 +368,13 @@ function ChatComponent({
 		};
 	}, [
 		view,
+		activeAgentLabel,
 		getInputState,
 		setInputState,
 		sendMessageForBroadcast,
 		canSendForBroadcast,
 		cancelForBroadcast,
 	]);
-
-	// ============================================================
-	// Effects - Session Lifecycle
-	// ============================================================
-	// Initialize session on mount
-	useEffect(() => {
-		logger.log("[Debug] Starting connection setup via useAgentSession...");
-		void agentSession.createSession(restoredAgentId);
-	}, [agentSession.createSession, restoredAgentId]);
-
-	// Re-create session when agentId is restored from workspace state
-	// This handles the case where setState() is called after onOpen()
-	// Only runs ONCE for initial restoration (prevents re-triggering on agent switch)
-	useEffect(() => {
-		// Only run once for initial restoration
-		if (hasRestoredAgentRef.current) {
-			return;
-		}
-
-		// Skip if no restored agentId (initial mount with null)
-		if (!restoredAgentId) {
-			return;
-		}
-
-		// Skip if session is still initializing (wait for it to be ready)
-		if (session.state === "initializing") {
-			return;
-		}
-
-		// Mark as handled once we can make a decision
-		hasRestoredAgentRef.current = true;
-
-		// Skip if already using the correct agent
-		if (session.agentId === restoredAgentId) {
-			return;
-		}
-
-		logger.log(
-			`[ChatView] Switching to restored agent: ${restoredAgentId} (current: ${session.agentId})`,
-		);
-		void agentSession.restartSession(restoredAgentId);
-	}, [restoredAgentId, session.state, session.agentId, agentSession, logger]);
-
-	// Refs for cleanup (to access latest values in cleanup function)
-	const messagesRef = useRef(messages);
-	const sessionRef = useRef(session);
-	const autoExportRef = useRef(autoExport);
-	const closeSessionRef = useRef(agentSession.closeSession);
-	messagesRef.current = messages;
-	sessionRef.current = session;
-	autoExportRef.current = autoExport;
-	closeSessionRef.current = agentSession.closeSession;
-
-	// Cleanup on unmount only - auto-export and close session
-	useEffect(() => {
-		return () => {
-			logger.log("[ChatView] Cleanup: auto-export and close session");
-			// Use refs to get latest values (avoid stale closures)
-			void (async () => {
-				await autoExportRef.current.autoExportIfEnabled(
-					"closeChat",
-					messagesRef.current,
-					sessionRef.current,
-				);
-				await closeSessionRef.current();
-			})();
-		};
-		// Empty dependency array - only run on unmount
-	}, []);
-
-	// Note: Previously monitored settings.activeAgentId to auto-switch agents.
-	// Removed for multi-session support - each view manages its own agentId locally.
-	// Agent switching is now done explicitly via Settings Menu.
-
-	// ============================================================
-	// Effects - ACP Adapter Callbacks
-	// ============================================================
-	// Register unified session update callback
-	useEffect(() => {
-		acpAdapter.onSessionUpdate((update) => {
-			// Filter by sessionId - ignore updates from old sessions
-			if (session.sessionId && update.sessionId !== session.sessionId) {
-				logger.log(
-					`[ChatView] Ignoring update for old session: ${update.sessionId} (current: ${session.sessionId})`,
-				);
-				return;
-			}
-
-			// During session/load, ignore history replay messages but process session-level updates
-			if (isLoadingSessionHistory) {
-				// Only process session-level updates during load
-				if (update.type === "available_commands_update") {
-					agentSession.updateAvailableCommands(update.commands);
-				} else if (update.type === "current_mode_update") {
-					agentSession.updateCurrentMode(update.currentModeId);
-				}
-				// Ignore all message-related updates (history replay)
-				return;
-			}
-
-			// Route message-related updates to useChat
-			chat.handleSessionUpdate(update);
-
-			// Route session-level updates to useAgentSession
-			if (update.type === "available_commands_update") {
-				agentSession.updateAvailableCommands(update.commands);
-			} else if (update.type === "current_mode_update") {
-				agentSession.updateCurrentMode(update.currentModeId);
-			}
-		});
-	}, [
-		acpAdapter,
-		session.sessionId,
-		logger,
-		isLoadingSessionHistory,
-		chat.handleSessionUpdate,
-		agentSession.updateAvailableCommands,
-		agentSession.updateCurrentMode,
-	]);
-
-	// Register updateMessage callback for permission UI updates
-	useEffect(() => {
-		acpAdapter.setUpdateMessageCallback(chat.updateMessage);
-	}, [acpAdapter, chat.updateMessage]);
-
-	// ============================================================
-	// Effects - Update Check
-	// ============================================================
-	useEffect(() => {
-		plugin
-			.checkForUpdates()
-			.then(setIsUpdateAvailable)
-			.catch((error) => {
-				console.error("Failed to check for updates:", error);
-			});
-	}, [plugin]);
-
-	// ============================================================
-	// Effects - Save Session Messages on Turn End
-	// ============================================================
-	// Track previous isSending state to detect turn completion
-	const prevIsSendingRef = useRef<boolean>(false);
-
-	useEffect(() => {
-		const wasSending = prevIsSendingRef.current;
-		prevIsSendingRef.current = isSending;
-
-		// Save when turn ends (isSending: true → false) and has messages
-		if (
-			wasSending &&
-			!isSending &&
-			session.sessionId &&
-			messages.length > 0
-		) {
-			// Fire-and-forget save via sessionHistory hook
-			sessionHistory.saveSessionMessages(session.sessionId, messages);
-			logger.log(
-				`[ChatView] Session messages saved: ${session.sessionId}`,
-			);
-		}
-	}, [isSending, session.sessionId, messages, sessionHistory, logger]);
-
-	// ============================================================
-	// Effects - Auto-mention Active Note Tracking
-	// ============================================================
-	useEffect(() => {
-		let isMounted = true;
-
-		const refreshActiveNote = async () => {
-			if (!isMounted) return;
-			await autoMention.updateActiveNote();
-		};
-
-		const unsubscribe = vaultAccessAdapter.subscribeSelectionChanges(() => {
-			void refreshActiveNote();
-		});
-
-		void refreshActiveNote();
-
-		return () => {
-			isMounted = false;
-			unsubscribe();
-		};
-	}, [autoMention.updateActiveNote, vaultAccessAdapter]);
 
 	// ============================================================
 	// Effects - Workspace Events (Hotkeys)
@@ -1014,7 +426,7 @@ function ChatComponent({
 			) {
 				return;
 			}
-			void handleNewChat(agentId);
+			void handleNewChatWithPersist(agentId);
 		});
 
 		return () => {
@@ -1023,7 +435,7 @@ function ChatComponent({
 	}, [
 		plugin.app.workspace,
 		plugin.lastActiveChatViewId,
-		handleNewChat,
+		handleNewChatWithPersist,
 		viewId,
 	]);
 
@@ -1111,33 +523,27 @@ function ChatComponent({
 	// ============================================================
 	// Render
 	// ============================================================
+	const chatFontSizeStyle =
+		settings.displaySettings.fontSize !== null
+			? ({
+					"--ac-chat-font-size": `${settings.displaySettings.fontSize}px`,
+				} as React.CSSProperties)
+			: undefined;
+
 	return (
-		<div className="agent-client-chat-view-container">
+		<div
+			className="agent-client-chat-view-container"
+			style={chatFontSizeStyle}
+		>
 			<ChatHeader
 				agentLabel={activeAgentLabel}
 				isUpdateAvailable={isUpdateAvailable}
 				hasHistoryCapability={sessionHistory.canShowSessionHistory}
-				onNewChat={() => void handleNewChat()}
+				onNewChat={() => void handleNewChatWithPersist()}
 				onExportChat={() => void handleExportChat()}
-				onToggleMenu={handleToggleMenu}
+				onShowMenu={handleShowMenu}
 				onOpenHistory={handleOpenHistory}
-				menuButtonRef={menuButtonRef}
 			/>
-
-			{isMenuOpen && (
-				<HeaderMenu
-					anchorRef={menuButtonRef}
-					currentAgentId={session.agentId || ""}
-					availableAgents={availableAgents}
-					onSwitchAgent={handleSwitchAgent}
-					onOpenNewView={handleOpenNewView}
-					onRestartAgent={handleRestartAgent}
-					onOpenPluginSettings={handleOpenSettings}
-					onClose={handleCloseMenu}
-					plugin={plugin}
-					view={view}
-				/>
-			)}
 
 			<ChatMessages
 				messages={messages}
@@ -1168,9 +574,9 @@ function ChatComponent({
 				onStopGeneration={handleStopGeneration}
 				onRestoredMessageConsumed={handleRestoredMessageConsumed}
 				modes={session.modes}
-				onModeChange={(modeId) => void agentSession.setMode(modeId)}
+				onModeChange={(modeId) => void handleSetMode(modeId)}
 				models={session.models}
-				onModelChange={(modelId) => void agentSession.setModel(modelId)}
+				onModelChange={(modelId) => void handleSetModel(modelId)}
 				supportsImages={session.promptCapabilities?.image ?? false}
 				agentId={session.agentId}
 				// Controlled component props (for broadcast commands)
@@ -1181,6 +587,7 @@ function ChatComponent({
 				// Error overlay props
 				errorInfo={errorInfo}
 				onClearError={handleClearError}
+				messages={messages}
 			/>
 		</div>
 	);
@@ -1192,18 +599,21 @@ interface ChatViewState extends Record<string, unknown> {
 }
 
 // Callback types for input state access (broadcast commands)
+type GetDisplayNameCallback = () => string;
 type GetInputStateCallback = () => ChatInputState | null;
 type SetInputStateCallback = (state: ChatInputState) => void;
 type SendMessageCallback = () => Promise<boolean>;
 type CanSendCallback = () => boolean;
 type CancelCallback = () => Promise<void>;
 
-export class ChatView extends ItemView {
+export class ChatView extends ItemView implements IChatViewContainer {
 	private root: Root | null = null;
 	private plugin: AgentClientPlugin;
 	private logger: Logger;
 	/** Unique identifier for this view instance (for multi-session support) */
 	readonly viewId: string;
+	/** View type for IChatViewContainer */
+	readonly viewType: ChatViewType = "sidebar";
 	/** Initial agent ID passed via state (for openNewChatViewWithAgent) */
 	private initialAgentId: string | null = null;
 	/** Callbacks to notify React when agentId is restored from workspace state */
@@ -1211,6 +621,7 @@ export class ChatView extends ItemView {
 		new Set();
 
 	// Callbacks for input state access (broadcast commands)
+	private getDisplayNameCallback: GetDisplayNameCallback | null = null;
 	private getInputStateCallback: GetInputStateCallback | null = null;
 	private setInputStateCallback: SetInputStateCallback | null = null;
 	private sendMessageCallback: SendMessageCallback | null = null;
@@ -1305,12 +716,14 @@ export class ChatView extends ItemView {
 	 * Called by ChatComponent on mount.
 	 */
 	registerInputCallbacks(callbacks: {
+		getDisplayName: GetDisplayNameCallback;
 		getInputState: GetInputStateCallback;
 		setInputState: SetInputStateCallback;
 		sendMessage: SendMessageCallback;
 		canSend: CanSendCallback;
 		cancel: CancelCallback;
 	}): void {
+		this.getDisplayNameCallback = callbacks.getDisplayName;
 		this.getInputStateCallback = callbacks.getInputState;
 		this.setInputStateCallback = callbacks.setInputState;
 		this.sendMessageCallback = callbacks.sendMessage;
@@ -1322,11 +735,16 @@ export class ChatView extends ItemView {
 	 * Unregister callbacks when component unmounts.
 	 */
 	unregisterInputCallbacks(): void {
+		this.getDisplayNameCallback = null;
 		this.getInputStateCallback = null;
 		this.setInputStateCallback = null;
 		this.sendMessageCallback = null;
 		this.canSendCallback = null;
 		this.cancelCallback = null;
+	}
+
+	getDisplayName(): string {
+		return this.getDisplayNameCallback?.() ?? "Chat";
 	}
 
 	/**
@@ -1365,6 +783,66 @@ export class ChatView extends ItemView {
 		await this.cancelCallback?.();
 	}
 
+	// ============================================================
+	// IChatViewContainer Implementation
+	// ============================================================
+
+	/**
+	 * Called when this view becomes the active/focused view.
+	 */
+	onActivate(): void {
+		this.logger.log(`[ChatView] Activated: ${this.viewId}`);
+	}
+
+	/**
+	 * Called when this view loses active/focused status.
+	 */
+	onDeactivate(): void {
+		this.logger.log(`[ChatView] Deactivated: ${this.viewId}`);
+	}
+
+	/**
+	 * Programmatically focus this view's input.
+	 * Reveals the leaf first so that Obsidian switches to this tab
+	 * before focusing the textarea (required for sidebar tabs).
+	 */
+	focus(): void {
+		void this.app.workspace.revealLeaf(this.leaf).then(() => {
+			const textarea = this.containerEl.querySelector(
+				"textarea.agent-client-chat-input-textarea",
+			);
+			if (textarea instanceof HTMLTextAreaElement) {
+				textarea.focus();
+			}
+		});
+	}
+
+	/**
+	 * Check if this view currently has focus.
+	 */
+	hasFocus(): boolean {
+		return this.containerEl.contains(document.activeElement);
+	}
+
+	/**
+	 * Expand the view if it's in a collapsed state.
+	 * Sidebar views don't have expand/collapse state - no-op.
+	 */
+	expand(): void {
+		// Sidebar views don't have expand/collapse state - no-op
+	}
+
+	collapse(): void {
+		// Sidebar views don't have expand/collapse state - no-op
+	}
+
+	/**
+	 * Get the DOM container element for this view.
+	 */
+	getContainerEl(): HTMLElement {
+		return this.containerEl;
+	}
+
 	onOpen() {
 		const container = this.containerEl.children[1];
 		container.empty();
@@ -1377,11 +855,19 @@ export class ChatView extends ItemView {
 				viewId={this.viewId}
 			/>,
 		);
+
+		// Register with plugin's view registry
+		this.plugin.viewRegistry.register(this);
+
 		return Promise.resolve();
 	}
 
 	async onClose(): Promise<void> {
 		this.logger.log("[ChatView] onClose() called");
+
+		// Unregister from plugin's view registry
+		this.plugin.viewRegistry.unregister(this.viewId);
+
 		// Cleanup is handled by React useEffect cleanup in ChatComponent
 		// which performs auto-export and closeSession
 		if (this.root) {

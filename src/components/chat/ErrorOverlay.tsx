@@ -2,7 +2,7 @@ import * as React from "react";
 const { useRef, useEffect } = React;
 import { setIcon } from "obsidian";
 import type { ErrorInfo } from "../../domain/models/agent-error";
-import type { ChatView } from "./ChatView";
+import type { IChatViewHost } from "./types";
 
 export interface ErrorOverlayProps {
 	/** Error information to display */
@@ -12,7 +12,7 @@ export interface ErrorOverlayProps {
 	/** Whether to show emojis */
 	showEmojis: boolean;
 	/** View instance for event registration */
-	view: ChatView;
+	view: IChatViewHost;
 }
 
 /**
@@ -21,7 +21,7 @@ export interface ErrorOverlayProps {
  * Design decisions:
  * - Uses same positioning pattern as SuggestionDropdown (position: absolute; bottom: 100%)
  * - Closes on outside click (consistent with SuggestionDropdown)
- * - Closes on Escape key (consistent with HeaderMenu)
+ * - Closes on Escape key (consistent with Obsidian's native Menu)
  * - Does not block chat messages from being visible
  */
 export function ErrorOverlay({

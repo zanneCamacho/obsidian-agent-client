@@ -153,7 +153,7 @@ If your plugin does not need CSS, delete this file.
 	background-color: transparent;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 4px;
-	font-size: 12px;
+	font-size: 0.85em;
 	user-select: text;
 	overflow-wrap: break-word;
 	word-wrap: break-word;
@@ -264,7 +264,6 @@ If your plugin does not need CSS, delete this file.
 .agent-client-message-permission-request {
 	padding: 6px 0px;
 	margin-top: 4px;
-	background-color: var(--background-secondary);
 	font-size: 14px;
 	user-select: text;
 	overflow-wrap: break-word;
@@ -389,6 +388,7 @@ If your plugin does not need CSS, delete this file.
 
 /* Main container */
 .agent-client-chat-view-container {
+	--ac-chat-font-size: var(--font-text-size);
 	height: 100%;
 	display: flex;
 	flex-direction: column;
@@ -431,6 +431,32 @@ If your plugin does not need CSS, delete this file.
 	gap: 8px;
 }
 
+/* ===== Inline Header (Floating/CodeBlock) ===== */
+.agent-client-inline-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background-color: var(--background-primary);
+	flex-shrink: 0;
+	flex-wrap: nowrap;
+	min-height: 36px;
+}
+
+.agent-client-inline-header-main {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.agent-client-inline-header-actions {
+	display: flex;
+	gap: 4px;
+	justify-content: flex-end;
+	flex-shrink: 0;
+}
+
 /* Messages container */
 .agent-client-chat-view-messages {
 	flex: 1;
@@ -440,6 +466,8 @@ If your plugin does not need CSS, delete this file.
 	display: flex;
 	flex-direction: column;
 	gap: 2px;
+	font-size: var(--ac-chat-font-size);
+	min-height: 0;
 }
 
 /* Allow horizontal scroll for wide tables within messages */
@@ -696,7 +724,7 @@ If your plugin does not need CSS, delete this file.
 	min-height: 80px;
 	max-height: 300px;
 	font-family: inherit;
-	font-size: var(--font-text-size);
+	font-size: var(--ac-chat-font-size);
 	line-height: var(--line-height-normal);
 	box-sizing: border-box;
 	outline: none;
@@ -749,7 +777,7 @@ If your plugin does not need CSS, delete this file.
 	padding: 12px;
 	box-sizing: border-box;
 	font-family: inherit;
-	font-size: var(--font-text-size);
+	font-size: var(--ac-chat-font-size);
 	line-height: var(--line-height-normal);
 	/* Text wrapping */
 	white-space: pre-wrap;
@@ -1121,7 +1149,7 @@ If your plugin does not need CSS, delete this file.
 	word-break: break-word;
 	overflow-wrap: break-word;
 	margin: 1em 0;
-	font-size: var(--font-text-size);
+	font-size: var(--ac-chat-font-size);
 	max-width: 100%;
 }
 
@@ -1137,7 +1165,7 @@ If your plugin does not need CSS, delete this file.
 /* Markdown Text Renderer */
 .agent-client-markdown-text-renderer {
 	user-select: text;
-	font-size: var(--font-text-size);
+	font-size: var(--ac-chat-font-size);
 	overflow-wrap: break-word;
 	word-wrap: break-word;
 	word-break: break-word;
@@ -1149,6 +1177,12 @@ If your plugin does not need CSS, delete this file.
 	overflow-wrap: break-word;
 	word-wrap: break-word;
 	word-break: break-word;
+	max-width: 100%;
+}
+
+.agent-client-markdown-text-renderer .markdown-rendered pre {
+	max-width: 100%;
+	overflow-x: auto;
 }
 
 /* Tool Call Diff Renderer */
@@ -1704,88 +1738,309 @@ If your plugin does not need CSS, delete this file.
 	gap: 8px;
 }
 
-/* ===== Settings Menu ===== */
-.agent-client-header-menu {
+/* ===== Floating Chat Button ===== */
+/* Floating button & menu root — higher z-index, always above windows */
+.agent-client-floating-button-root {
 	position: fixed;
-	z-index: 1000;
-	min-width: 180px;
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 6px;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-	padding: 4px 0;
+	z-index: 30;
+	pointer-events: none;
 }
 
-.agent-client-header-menu-item {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 12px;
+.agent-client-floating-button-root > * {
+	pointer-events: auto;
+}
+
+/* Floating chat window root — lower z-index */
+.agent-client-floating-view-root {
+	position: fixed;
+	z-index: 20;
+	pointer-events: none;
+}
+
+.agent-client-floating-view-root.is-focused {
+	z-index: 21;
+}
+
+.agent-client-floating-view-root > * {
+	pointer-events: auto;
+}
+
+.agent-client-floating-button {
+	position: fixed;
+	bottom: 30px;
+	right: 40px;
+	width: 48px;
+	height: 48px;
+	min-width: 48px;
+	min-height: 48px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
 	cursor: pointer;
-	color: var(--text-normal);
-	transition: background-color 0.1s ease;
-}
-
-.agent-client-header-menu-item:hover,
-.agent-client-header-menu-item.agent-client-selected {
-	background-color: var(--background-modifier-hover);
-}
-
-.agent-client-header-menu-item.agent-client-current {
-	color: var(--interactive-accent-hover);
-}
-
-.agent-client-header-menu-icon {
-	width: 16px;
-	height: 16px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	flex-shrink: 0;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+	transition:
+		transform 0.2s,
+		box-shadow 0.2s;
+	overflow: hidden;
+	padding: 0;
 }
 
-.agent-client-header-menu-icon svg {
-	width: 14px;
-	height: 14px;
+.agent-client-floating-button.has-custom-image {
+	background: transparent;
 }
 
-.agent-client-header-menu-arrow {
-	margin-left: auto;
+.agent-client-floating-button:hover {
+	transform: scale(1.05);
+	box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.agent-client-floating-button.is-dragging {
+	cursor: grabbing;
+	transition: none;
+	user-select: none;
+}
+
+.agent-client-floating-button img {
+	width: 48px;
+	height: 48px;
+	min-width: 48px;
+	min-height: 48px;
+	object-fit: cover;
+	object-position: center;
+	border-radius: 50%;
+	display: block;
+}
+
+.agent-client-floating-button-fallback {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--text-on-accent);
+}
+
+.agent-client-floating-button-fallback svg {
+	width: 24px;
+	height: 24px;
+}
+
+/* ===== Floating Chat Window ===== */
+.agent-client-floating-window {
+	position: fixed;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	resize: both;
+	min-width: 300px;
+	min-height: 460px;
+}
+
+.agent-client-floating-header {
+	cursor: grab;
+	user-select: none;
+	border-radius: 11px 11px 0 0;
+	overflow: hidden;
+}
+
+.agent-client-floating-header:active {
+	cursor: grabbing;
+}
+
+.agent-client-floating-header .agent-client-inline-header {
+	border-radius: 11px 11px 0 0;
+}
+
+.agent-client-floating-content {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	padding: 4px;
+	min-height: 0;
+}
+
+.agent-client-floating-messages-container {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden; /* Let inner .agent-client-chat-view-messages handle scrolling */
+	margin-bottom: 8px;
+	min-height: 0;
+}
+
+/* Floating chat instance selector menu */
+.agent-client-floating-instance-menu {
+	position: fixed;
+	bottom: 100px;
+	right: 20px;
+	min-width: 220px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+	overflow: hidden;
+}
+
+.agent-client-floating-instance-menu-header {
+	padding: 12px 16px;
+	font-weight: 600;
+	font-size: 13px;
 	color: var(--text-muted);
-	font-size: 14px;
+	background: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.agent-client-header-menu-check {
-	margin-left: auto;
-	color: var(--interactive-accent-hover);
-	font-size: 12px;
-}
-
-.agent-client-header-menu-separator {
-	height: 1px;
-	background-color: var(--background-modifier-border);
-	margin: 4px 0;
-}
-
-.agent-client-header-menu-header {
-	padding: 8px 12px 4px;
-	font-size: 11px;
-	font-weight: 400;
-	color: var(--text-muted);
-	letter-spacing: 0.05em;
-}
-
-.agent-client-header-menu-back {
+.agent-client-floating-instance-menu-item {
+	padding: 10px 16px;
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text-normal);
+	transition: background-color 0.1s;
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	padding: 8px 12px;
-	cursor: pointer;
-	color: var(--text-muted);
-	font-size: 12px;
-	transition: background-color 0.1s ease;
 }
 
-.agent-client-header-menu-back:hover {
+.agent-client-floating-instance-menu-label {
+	flex: 1;
+}
+
+.agent-client-floating-instance-menu-item:hover {
+	background: var(--background-modifier-hover);
+}
+
+.agent-client-floating-instance-menu-close {
+	width: 20px;
+	height: 20px;
+	padding: 0 !important;
+	margin: 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	background-color: transparent !important;
+	box-shadow: none !important;
+	color: var(--text-muted);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 16px;
+	outline: none !important;
+	appearance: none;
+}
+
+.agent-client-floating-instance-menu-close:hover {
+	background-color: var(--background-modifier-hover) !important;
+	color: var(--interactive-accent);
+}
+
+/* ===== Code Block Chat View ===== */
+/* TODO(code-block): Styles for future code block chat view */
+.agent-client-code-block-container {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-primary);
+	overflow: hidden;
+}
+
+.agent-client-code-block-content {
+	display: flex;
+	flex-direction: column;
+	padding: 8px;
+}
+
+.agent-client-code-block-status {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 4px 8px;
+	background: var(--background-secondary);
+	border-radius: 4px;
+	margin-bottom: 4px;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.agent-client-code-block-status-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.agent-client-code-block-messages {
+	max-height: 400px;
+	overflow-y: auto;
+	margin-bottom: 8px;
+}
+
+/* ===== Agent Selector (InlineHeader) ===== */
+.agent-client-agent-selector {
+	display: inline-flex;
+	align-items: center;
+	padding: 0 4px;
+	border-radius: 4px;
+	cursor: pointer;
+	transition: background-color 0.1s ease;
+	height: 20px;
+	max-width: 160px;
+}
+
+.agent-client-agent-selector:hover {
 	background-color: var(--background-modifier-hover);
+}
+
+.agent-client-agent-selector-icon {
+	display: flex;
+	align-items: center;
+	pointer-events: none;
+	color: var(--text-faint);
+	margin-left: 2px;
+	order: 2;
+}
+
+.agent-client-agent-selector-icon svg {
+	width: 12px;
+	height: 12px;
+}
+
+.agent-client-agent-selector select.dropdown {
+	padding: 0 !important;
+	margin: 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	background: none !important;
+	background-color: transparent !important;
+	background-image: none !important;
+	box-shadow: none !important;
+	color: var(--text-normal) !important;
+	font-size: 12px !important;
+	cursor: pointer !important;
+	outline: none !important;
+	appearance: none !important;
+	-webkit-appearance: none !important;
+	-moz-appearance: none !important;
+	max-width: 140px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+.agent-client-agent-selector select.dropdown:hover,
+.agent-client-agent-selector select.dropdown:focus {
+	color: var(--text-normal) !important;
+	background-color: transparent !important;
+	box-shadow: none !important;
+}
+
+/* Agent label (single agent) */
+.agent-client-agent-label {
+	color: var(--text-normal);
+	font-size: 12px;
 }

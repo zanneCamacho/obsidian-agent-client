@@ -12,6 +12,11 @@ import type {
 	ChatViewLocation,
 } from "../../plugin";
 import { normalizeEnvVars } from "../../shared/settings-utils";
+import {
+	CHAT_FONT_SIZE_MAX,
+	CHAT_FONT_SIZE_MIN,
+	parseChatFontSize,
+} from "../../shared/display-settings";
 
 export class AgentClientSettingTab extends PluginSettingTab {
 	plugin: AgentClientPlugin;
@@ -177,6 +182,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("right-tab", "Right pane (tabs)")
+					.addOption("right-split", "Right pane (split)")
 					.addOption("editor-tab", "Editor area (tabs)")
 					.addOption("editor-split", "Editor area (split)")
 					.setValue(this.plugin.settings.chatViewLocation)
@@ -186,6 +192,103 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}),
 			);
+
+		new Setting(containerEl)
+			.setName("Chat font size")
+			.setDesc(
+				`Adjust the font size of the chat message area (${CHAT_FONT_SIZE_MIN}-${CHAT_FONT_SIZE_MAX}px).`,
+			)
+			.addText((text) => {
+				const getCurrentDisplayValue = (): string => {
+					const currentFontSize =
+						this.plugin.settings.displaySettings.fontSize;
+					return currentFontSize === null
+						? ""
+						: String(currentFontSize);
+				};
+
+				const persistChatFontSize = async (
+					fontSize: number | null,
+				): Promise<void> => {
+					if (
+						this.plugin.settings.displaySettings.fontSize ===
+						fontSize
+					) {
+						return;
+					}
+
+					const nextSettings = {
+						...this.plugin.settings,
+						displaySettings: {
+							...this.plugin.settings.displaySettings,
+							fontSize,
+						},
+					};
+					await this.plugin.saveSettingsAndNotify(nextSettings);
+				};
+
+				text.setPlaceholder(
+					`${CHAT_FONT_SIZE_MIN}-${CHAT_FONT_SIZE_MAX}`,
+				)
+					.setValue(getCurrentDisplayValue())
+					.onChange(async (value) => {
+						if (value.trim().length === 0) {
+							await persistChatFontSize(null);
+							return;
+						}
+
+						const trimmedValue = value.trim();
+						if (!/^-?\d+$/.test(trimmedValue)) {
+							return;
+						}
+
+						const numericValue = Number.parseInt(trimmedValue, 10);
+						if (
+							numericValue < CHAT_FONT_SIZE_MIN ||
+							numericValue > CHAT_FONT_SIZE_MAX
+						) {
+							return;
+						}
+
+						const parsedFontSize = parseChatFontSize(numericValue);
+						if (parsedFontSize === null) {
+							return;
+						}
+
+						const hasChanged =
+							this.plugin.settings.displaySettings.fontSize !==
+							parsedFontSize;
+						if (hasChanged) {
+							await persistChatFontSize(parsedFontSize);
+						}
+					});
+
+				text.inputEl.addEventListener("blur", () => {
+					const currentInputValue = text.getValue();
+					const parsedFontSize = parseChatFontSize(currentInputValue);
+
+					if (
+						currentInputValue.trim().length > 0 &&
+						parsedFontSize === null
+					) {
+						text.setValue(getCurrentDisplayValue());
+						return;
+					}
+
+					if (parsedFontSize !== null) {
+						text.setValue(String(parsedFontSize));
+						const hasChanged =
+							this.plugin.settings.displaySettings.fontSize !==
+							parsedFontSize;
+						if (hasChanged) {
+							void persistChatFontSize(parsedFontSize);
+						}
+						return;
+					}
+
+					text.setValue("");
+				});
+			});
 
 		new Setting(containerEl)
 			.setName("Show emojis")
@@ -244,6 +347,56 @@ export class AgentClientSettingTab extends PluginSettingTab {
 						}),
 				);
 		}
+
+		// ─────────────────────────────────────────────────────────────────────
+		// Floating chat
+		// ─────────────────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Floating chat").setHeading();
+
+		new Setting(containerEl)
+			.setName("Show floating button")
+			.setDesc(
+				"Display a floating chat button that opens a draggable chat window.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showFloatingButton)
+					.onChange(async (value) => {
+						const wasEnabled =
+							this.plugin.settings.showFloatingButton;
+						this.plugin.settings.showFloatingButton = value;
+						await this.plugin.saveSettings();
+
+						// Handle dynamic toggle of floating chat
+						if (value && !wasEnabled) {
+							// Turning ON: create floating chat instance
+							this.plugin.openNewFloatingChat();
+						} else if (!value && wasEnabled) {
+							// Turning OFF: close all floating chat instances
+							const instances =
+								this.plugin.getFloatingChatInstances();
+							for (const instanceId of instances) {
+								this.plugin.closeFloatingChat(instanceId);
+							}
+						}
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Floating button image")
+			.setDesc(
+				"URL or path to an image for the floating button. Leave empty for default icon.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("https://example.com/avatar.png")
+					.setValue(this.plugin.settings.floatingButtonImage)
+					.onChange(async (value) => {
+						this.plugin.settings.floatingButtonImage = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
 
 		// ─────────────────────────────────────────────────────────────────────
 		// Permissions
